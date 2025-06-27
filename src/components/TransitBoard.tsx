@@ -136,7 +136,7 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
       stopName: string;
     }> = [];
 
-    if (parsedRealtimeData?.entity && staticData?.success) {
+    if (staticData?.success) {
       try {
         // First, find the stop_id that corresponds to this stop_code
         const stopInfo = staticData.data.stops.find((stop: any) => stop.stop_code === stopCode);
@@ -155,51 +155,116 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
         const stopName = stopNames[stopCode] || stopInfo.stop_name || 'Unknown Stop';
         console.log(`Processing stop ${stopCode} (ID: ${stopId})`);
 
-        let matchCount = 0;
-        parsedRealtimeData.entity.forEach((entity: any) => {
-          if (entity.tripUpdate?.stopTimeUpdate) {
-            entity.tripUpdate.stopTimeUpdate.forEach((stopUpdate: any) => {
-              // Now compare with the actual stop_id from GTFS
-              if (stopUpdate.stopId === stopId) {
-                matchCount++;
-                const arrivalTime = stopUpdate.arrival?.time || stopUpdate.departure?.time;
-                if (arrivalTime) {
-                  const arrivalTimeMs = arrivalTime * 1000;
-                  const now = Date.now();
-                  const minutesUntilArrival = Math.floor((arrivalTimeMs - now) / (1000 * 60));
-                  
-                  // Only include trips that haven't departed yet (at least -1 minute buffer)
-                  // and are within the next 60 minutes
-                  if (minutesUntilArrival >= -1 && minutesUntilArrival <= 60) {
-                    const gtfsRouteId = entity.tripUpdate.trip?.routeId || 'Unknown';
-                    const gtfsTripId = entity.tripUpdate.trip?.tripId || 'Unknown';
+        const now = Date.now();
+        const realtimeTripIds = new Set<string>();
+
+        // First, process real-time data if available
+        let realtimeCount = 0;
+        if (parsedRealtimeData?.entity) {
+          parsedRealtimeData.entity.forEach((entity: any) => {
+            if (entity.tripUpdate?.stopTimeUpdate) {
+              entity.tripUpdate.stopTimeUpdate.forEach((stopUpdate: any) => {
+                // Now compare with the actual stop_id from GTFS
+                if (stopUpdate.stopId === stopId) {
+                  realtimeCount++;
+                  const arrivalTime = stopUpdate.arrival?.time || stopUpdate.departure?.time;
+                  if (arrivalTime) {
+                    const arrivalTimeMs = arrivalTime * 1000;
+                    const minutesUntilArrival = Math.floor((arrivalTimeMs - now) / (1000 * 60));
                     
-                    // Find the readable route number from static data
-                    const routeInfo = staticData.data.routes.find((route: any) => route.route_id === gtfsRouteId);
-                    const readableRouteNumber = routeInfo?.route_short_name || gtfsRouteId;
-                    
-                    // Find trip information for headsign
-                    const tripInfo = staticData.data.trips.find((trip: any) => trip.trip_id === gtfsTripId);
-                    const headsign = tripInfo?.trip_headsign || 'Unknown Destination';
-                    
-                    const delay = stopUpdate.arrival?.delay || stopUpdate.departure?.delay || 0;
-                    
-                    arrivals.push({
-                      routeId: readableRouteNumber,
-                      tripId: headsign,
-                      arrivalTime: arrivalTimeMs,
-                      delay: delay,
-                      stopCode: stopCode,
-                      stopName: stopName
-                    });
+                    // Only include trips that haven't departed yet (at least -1 minute buffer)
+                    // and are within the next 60 minutes
+                    console.log(`Real-time trip: ${entity.tripUpdate.trip?.tripId}, minutes until arrival: ${minutesUntilArrival}`);
+                    if (minutesUntilArrival >= -1 && minutesUntilArrival <= 60) {
+                      const gtfsRouteId = entity.tripUpdate.trip?.routeId || 'Unknown';
+                      const gtfsTripId = entity.tripUpdate.trip?.tripId || 'Unknown';
+                      
+                      // Track which trips we have real-time data for
+                      realtimeTripIds.add(gtfsTripId);
+                      
+                      // Find the readable route number from static data
+                      const routeInfo = staticData.data.routes.find((route: any) => route.route_id === gtfsRouteId);
+                      const readableRouteNumber = routeInfo?.route_short_name || gtfsRouteId;
+                      
+                      // Find trip information for headsign
+                      const tripInfo = staticData.data.trips.find((trip: any) => trip.trip_id === gtfsTripId);
+                      const headsign = tripInfo?.trip_headsign || 'Unknown Destination';
+                      
+                      const delay = stopUpdate.arrival?.delay || stopUpdate.departure?.delay || 0;
+                      
+                      arrivals.push({
+                        routeId: readableRouteNumber,
+                        tripId: headsign,
+                        arrivalTime: arrivalTimeMs,
+                        delay: delay,
+                        stopCode: stopCode,
+                        stopName: stopName
+                      });
+                    }
                   }
                 }
-              }
-            });
+              });
+            }
+          });
+        }
+
+        // Add scheduled trips from static data for routes not covered by real-time data
+        const currentTime = new Date();
+        const currentTimeStr = currentTime.toTimeString().substring(0, 8); // HH:MM:SS format
+        const maxTimeStr = new Date(now + 60 * 60 * 1000).toTimeString().substring(0, 8); // +60 minutes
+
+        // Find all stop times for this stop
+        const stopTimes = staticData.data.stop_times?.filter((st: any) => st.stop_id === stopId) || [];
+        
+        // Group by trip_id and get the next few scheduled arrivals
+        const scheduledTrips = new Map<string, any>();
+        stopTimes.forEach((stopTime: any) => {
+          const arrivalTime = stopTime.arrival_time || stopTime.departure_time;
+          if (arrivalTime && arrivalTime >= currentTimeStr && arrivalTime <= maxTimeStr) {
+            if (!realtimeTripIds.has(stopTime.trip_id)) {
+              scheduledTrips.set(stopTime.trip_id, stopTime);
+            }
           }
         });
 
-        console.log(`Found ${matchCount} matches for stop ${stopCode}, ${arrivals.length} valid arrivals within 60 minutes`);
+        // Add scheduled trips to arrivals
+        let scheduledCount = 0;
+        scheduledTrips.forEach((stopTime) => {
+          const tripInfo = staticData.data.trips.find((trip: any) => trip.trip_id === stopTime.trip_id);
+          if (tripInfo) {
+            const routeInfo = staticData.data.routes.find((route: any) => route.route_id === tripInfo.route_id);
+            const readableRouteNumber = routeInfo?.route_short_name || tripInfo.route_id;
+            const headsign = tripInfo.trip_headsign || 'Unknown Destination';
+            
+            // Convert scheduled time to timestamp (approximate)
+            const timeStr = stopTime.arrival_time || stopTime.departure_time;
+            const [hours, minutes, seconds] = timeStr.split(':').map(Number);
+            const scheduledTime = new Date();
+            scheduledTime.setHours(hours, minutes, seconds, 0);
+            
+            // If the scheduled time is in the past, assume it's tomorrow
+            if (scheduledTime.getTime() < now) {
+              scheduledTime.setDate(scheduledTime.getDate() + 1);
+            }
+            
+            const minutesUntilArrival = Math.floor((scheduledTime.getTime() - now) / (1000 * 60));
+            
+            console.log(`Scheduled trip: ${stopTime.trip_id}, route: ${readableRouteNumber}, time: ${timeStr}, minutes until arrival: ${minutesUntilArrival}`);
+            if (minutesUntilArrival >= -1 && minutesUntilArrival <= 60) {
+              scheduledCount++;
+              arrivals.push({
+                routeId: readableRouteNumber,
+                tripId: headsign,
+                arrivalTime: scheduledTime.getTime(),
+                delay: 0, // No delay info for scheduled trips
+                stopCode: stopCode,
+                stopName: stopName
+              });
+            }
+          }
+        });
+
+        console.log(`Stop ${stopCode}: ${realtimeCount} real-time arrivals, ${scheduledCount} scheduled arrivals, ${arrivals.length} total within 60 minutes`);
 
         // Sort arrivals by time
         arrivals.sort((a, b) => a.arrivalTime - b.arrivalTime);
