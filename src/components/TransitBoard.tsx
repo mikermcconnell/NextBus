@@ -209,57 +209,56 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
         }
 
         // Add scheduled trips from static data for routes not covered by real-time data
-        const currentTime = new Date();
-        const currentTimeStr = currentTime.toTimeString().substring(0, 8); // HH:MM:SS format
-        const maxTimeStr = new Date(now + 60 * 60 * 1000).toTimeString().substring(0, 8); // +60 minutes
-
-        // Find all stop times for this stop
         const stopTimes = staticData.data.stop_times?.filter((st: any) => st.stop_id === stopId) || [];
         
-        // Group by trip_id and get the next few scheduled arrivals
-        const scheduledTrips = new Map<string, any>();
-        stopTimes.forEach((stopTime: any) => {
-          const arrivalTime = stopTime.arrival_time || stopTime.departure_time;
-          if (arrivalTime && arrivalTime >= currentTimeStr && arrivalTime <= maxTimeStr) {
-            if (!realtimeTripIds.has(stopTime.trip_id)) {
-              scheduledTrips.set(stopTime.trip_id, stopTime);
-            }
-          }
-        });
-
-        // Add scheduled trips to arrivals
+        // Process scheduled trips
         let scheduledCount = 0;
-        scheduledTrips.forEach((stopTime) => {
+        stopTimes.forEach((stopTime: any) => {
+          // Skip if we already have real-time data for this trip
+          if (realtimeTripIds.has(stopTime.trip_id)) {
+            return;
+          }
+
           const tripInfo = staticData.data.trips.find((trip: any) => trip.trip_id === stopTime.trip_id);
           if (tripInfo) {
             const routeInfo = staticData.data.routes.find((route: any) => route.route_id === tripInfo.route_id);
             const readableRouteNumber = routeInfo?.route_short_name || tripInfo.route_id;
             const headsign = tripInfo.trip_headsign || 'Unknown Destination';
             
-            // Convert scheduled time to timestamp (approximate)
+            // Convert scheduled time to timestamp
             const timeStr = stopTime.arrival_time || stopTime.departure_time;
-            const [hours, minutes, seconds] = timeStr.split(':').map(Number);
-            const scheduledTime = new Date();
-            scheduledTime.setHours(hours, minutes, seconds, 0);
-            
-            // If the scheduled time is in the past, assume it's tomorrow
-            if (scheduledTime.getTime() < now) {
-              scheduledTime.setDate(scheduledTime.getDate() + 1);
-            }
-            
-            const minutesUntilArrival = Math.floor((scheduledTime.getTime() - now) / (1000 * 60));
-            
-            console.log(`Scheduled trip: ${stopTime.trip_id}, route: ${readableRouteNumber}, time: ${timeStr}, minutes until arrival: ${minutesUntilArrival}`);
-            if (minutesUntilArrival >= -1 && minutesUntilArrival <= 60) {
-              scheduledCount++;
-              arrivals.push({
-                routeId: readableRouteNumber,
-                tripId: headsign,
-                arrivalTime: scheduledTime.getTime(),
-                delay: 0, // No delay info for scheduled trips
-                stopCode: stopCode,
-                stopName: stopName
-              });
+            if (timeStr) {
+              const [hours, minutes, seconds] = timeStr.split(':').map(Number);
+              const scheduledTime = new Date();
+              scheduledTime.setHours(hours, minutes, seconds, 0);
+              
+              // Handle times after midnight (e.g., 24:30:00 becomes 00:30:00 next day)
+              if (hours >= 24) {
+                scheduledTime.setHours(hours - 24, minutes, seconds, 0);
+                scheduledTime.setDate(scheduledTime.getDate() + 1);
+              }
+              
+              // If the scheduled time is in the past, assume it's tomorrow
+              if (scheduledTime.getTime() < now) {
+                scheduledTime.setDate(scheduledTime.getDate() + 1);
+              }
+              
+              const minutesUntilArrival = Math.floor((scheduledTime.getTime() - now) / (1000 * 60));
+              
+              console.log(`Scheduled trip: ${stopTime.trip_id}, route: ${readableRouteNumber}, time: ${timeStr}, minutes until arrival: ${minutesUntilArrival}`);
+              
+              // Apply strict 60-minute window filter
+              if (minutesUntilArrival >= -1 && minutesUntilArrival <= 60) {
+                scheduledCount++;
+                arrivals.push({
+                  routeId: readableRouteNumber,
+                  tripId: headsign,
+                  arrivalTime: scheduledTime.getTime(),
+                  delay: 0, // No delay info for scheduled trips
+                  stopCode: stopCode,
+                  stopName: stopName
+                });
+              }
             }
           }
         });
@@ -295,10 +294,16 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
   // Combine all stop data and sort by arrival time
   const getCombinedArrivals = useCallback((): CombinedArrival[] => {
     const allArrivals: CombinedArrival[] = [];
+    const now = Date.now();
     
     stopCodes.forEach(stopCode => {
       const stopData = processStopData(stopCode);
-      allArrivals.push(...stopData.arrivals);
+      // Double-check: filter out any arrivals beyond 60 minutes
+      const filteredArrivals = stopData.arrivals.filter(arrival => {
+        const minutesUntilArrival = Math.floor((arrival.arrivalTime - now) / (1000 * 60));
+        return minutesUntilArrival >= -1 && minutesUntilArrival <= 60;
+      });
+      allArrivals.push(...filteredArrivals);
     });
     
     // Sort all arrivals by arrival time
