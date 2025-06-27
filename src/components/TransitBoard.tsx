@@ -169,7 +169,8 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
                   const minutesUntilArrival = Math.floor((arrivalTimeMs - now) / (1000 * 60));
                   
                   // Only include trips that haven't departed yet (at least -1 minute buffer)
-                  if (minutesUntilArrival >= -1) {
+                  // and are within the next 60 minutes
+                  if (minutesUntilArrival >= -1 && minutesUntilArrival <= 60) {
                     const gtfsRouteId = entity.tripUpdate.trip?.routeId || 'Unknown';
                     const gtfsTripId = entity.tripUpdate.trip?.tripId || 'Unknown';
                     
@@ -198,14 +199,14 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
           }
         });
 
-        console.log(`Found ${matchCount} matches for stop ${stopCode}, ${arrivals.length} valid arrivals`);
+        console.log(`Found ${matchCount} matches for stop ${stopCode}, ${arrivals.length} valid arrivals within 60 minutes`);
 
         // Sort arrivals by time
         arrivals.sort((a, b) => a.arrivalTime - b.arrivalTime);
 
         return {
           stopCode,
-          arrivals: arrivals.slice(0, 20), // Limit to first 20 arrivals
+          arrivals: arrivals, // Show all arrivals within 60 minutes
           lastUpdate: lastGlobalUpdate || undefined,
         };
       } catch (error) {
@@ -238,7 +239,7 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
     // Sort all arrivals by arrival time
     allArrivals.sort((a, b) => a.arrivalTime - b.arrivalTime);
     
-    return allArrivals.slice(0, 50); // Limit to 50 total arrivals
+    return allArrivals; // Show all arrivals within 60 minutes
   }, [stopCodes, processStopData]);
 
   const formatArrivalTime = (timestamp: number, delay: number = 0) => {
