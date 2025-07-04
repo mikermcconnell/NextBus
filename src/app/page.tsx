@@ -18,6 +18,15 @@ interface StopNotification {
   id?: string;
 }
 
+// Suggested configurations
+const SUGGESTED_CONFIGS = [
+  {
+    name: 'Georgian College',
+    stops: ['330', '331', '335', '329']
+  },
+  // Add more suggested configs here if needed
+];
+
 export default function Home() {
   const [stopCodes, setStopCodes] = useState<string[]>([]);
   const [stopNames, setStopNames] = useState<Record<string, string>>({});
@@ -29,6 +38,8 @@ export default function Home() {
   const [notifications, setNotifications] = useState<StopNotification[]>([]);
   const [suggestedStops, setSuggestedStops] = useState<string[]>([]);
   const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(-1);
+  const [savedConfigs, setSavedConfigs] = useState<{ name: string; stops: string[] }[]>([]);
+  const [newConfigName, setNewConfigName] = useState('');
   
   // Track notification timeouts for cleanup
   const notificationTimeouts = useRef<Map<string, NodeJS.Timeout>>(new Map());
@@ -48,6 +59,10 @@ export default function Home() {
     
     if (savedStopCodes) {
       setStopCodes(JSON.parse(savedStopCodes));
+    }
+    const configs = localStorage.getItem('savedConfigs');
+    if (configs) {
+      setSavedConfigs(JSON.parse(configs));
     }
   }, []);
 
@@ -342,6 +357,26 @@ export default function Home() {
     };
   }, []);
 
+  // Save current stops as a new config
+  const handleSaveConfig = () => {
+    const trimmedName = newConfigName.trim();
+    if (!trimmedName) return;
+    if (stopCodes.length === 0) return;
+    if (savedConfigs.some(cfg => cfg.name === trimmedName)) return;
+    setSavedConfigs([...savedConfigs, { name: trimmedName, stops: stopCodes }]);
+    setNewConfigName('');
+  };
+
+  // Load a config (replace current stops)
+  const handleLoadConfig = (stops: string[]) => {
+    setStopCodes(stops);
+  };
+
+  // Delete a saved config
+  const handleDeleteConfig = (name: string) => {
+    setSavedConfigs(savedConfigs.filter(cfg => cfg.name !== name));
+  };
+
   // Don't render until client-side initialization is complete
   if (!isClient) {
     return (
@@ -404,6 +439,64 @@ export default function Home() {
               ))}
             </div>
           )}
+
+          {/* Configurations UI */}
+          <div className="mb-6 grid gap-2 md:grid-cols-2">
+            <div className="bg-white shadow rounded-lg p-4">
+              <h3 className="font-bold text-barrie-blue mb-2">Suggested Configurations</h3>
+              <div className="flex flex-wrap gap-2">
+                {SUGGESTED_CONFIGS.map(cfg => (
+                  <button
+                    key={cfg.name}
+                    className="px-3 py-1 bg-barrie-blue text-white rounded hover:bg-blue-800"
+                    onClick={() => handleLoadConfig(cfg.stops)}
+                  >
+                    {cfg.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="bg-white shadow rounded-lg p-4">
+              <h3 className="font-bold text-barrie-blue mb-2">Your Saved Configurations</h3>
+              <div className="flex flex-wrap gap-2 mb-2">
+                {savedConfigs.length === 0 && <span className="text-gray-500">No saved configs yet</span>}
+                {savedConfigs.map(cfg => (
+                  <div key={cfg.name} className="flex items-center gap-1 bg-gray-100 rounded px-2 py-1">
+                    <button
+                      className="font-medium text-barrie-blue hover:underline"
+                      onClick={() => handleLoadConfig(cfg.stops)}
+                    >
+                      {cfg.name}
+                    </button>
+                    <button
+                      className="text-red-500 hover:text-red-700 ml-1"
+                      onClick={() => handleDeleteConfig(cfg.name)}
+                      title="Delete"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-2 mt-2">
+                <input
+                  type="text"
+                  className="border px-2 py-1 rounded flex-1"
+                  placeholder="Save current as..."
+                  value={newConfigName}
+                  onChange={e => setNewConfigName(e.target.value)}
+                  maxLength={32}
+                />
+                <button
+                  className="px-3 py-1 bg-barrie-blue text-white rounded hover:bg-blue-800"
+                  onClick={handleSaveConfig}
+                  disabled={!newConfigName.trim() || stopCodes.length === 0 || savedConfigs.some(cfg => cfg.name === newConfigName.trim())}
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
 
           <div className="grid gap-4">
             <div className="bg-white shadow-lg rounded-lg p-2 mb-1">
