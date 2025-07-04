@@ -105,4 +105,10 @@ export async function GET(request: NextRequest) {
       processingTime: Date.now() - startTime
     }, { status: 500 });
   }
+}
+
+// Add cache invalidation endpoint
+export async function DELETE() {
+  realtimeCache = null;
+  return NextResponse.json({ success: true, message: 'Real-time cache cleared' });
 } 

@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import TransitBoard from '@/components/TransitBoard';
 import LoadingSpinner from '@/components/LoadingSpinner';
 import ErrorBoundary from '@/components/ErrorBoundary';
+import { useDebounce } from '@/hooks/useDebounce';
 
 interface StopInfo {
   code: string;
@@ -14,6 +15,7 @@ interface StopNotification {
   type: 'error' | 'warning' | 'success';
   message: string;
   stopCode?: string;
+  id?: string;
 }
 
 export default function Home() {
@@ -25,6 +27,14 @@ export default function Home() {
   const [stopLoadError, setStopLoadError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
   const [notifications, setNotifications] = useState<StopNotification[]>([]);
+  const [suggestedStops, setSuggestedStops] = useState<string[]>([]);
+  const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(-1);
+  
+  // Track notification timeouts for cleanup
+  const notificationTimeouts = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  
+  // Debounce the stop code input for auto-add functionality
+  const debouncedStopCode = useDebounce(newStopCode, 1000);
 
   // Fixed refresh interval at 15 seconds
   const refreshInterval = 15;
@@ -77,6 +87,14 @@ export default function Home() {
           }
         });
         
+        // DEBUG: Check for stop 330 specifically
+        const stop330 = staticData.stops.find((stop: any) => stop.stop_code === '330');
+        console.log('DEBUG: Stop 330 found in static data:', stop330);
+        
+        // DEBUG: Check for route 400 specifically
+        const route400 = staticData.routes.find((route: any) => route.route_short_name === '400');
+        console.log('DEBUG: Route 400 found in static data:', route400);
+        
         console.log('Stop names map created:', Object.keys(namesMap).length, 'entries');
         
         setStopNames(namesMap);
@@ -117,25 +135,60 @@ export default function Home() {
       });
       
       setNotifications(newNotifications);
-    } else {
+    } else if (Object.keys(stopNames).length > 0) {
+      // Clear notifications when stops are loaded but no stop codes are present
       setNotifications([]);
     }
   }, [stopCodes, stopNames]);
 
-  const addNotification = (notification: StopNotification) => {
-    setNotifications(prev => [...prev, notification]);
-    // Auto-remove after 5 seconds
-    setTimeout(() => {
-      setNotifications(prev => prev.filter(n => n !== notification));
+  const addNotification = useCallback((notification: StopNotification) => {
+    const id = `${Date.now()}-${Math.random()}`;
+    const notificationWithId = { ...notification, id };
+    
+    setNotifications(prev => [...prev, notificationWithId]);
+    
+    // Set up auto-removal with cleanup tracking
+    const timeoutId = setTimeout(() => {
+      setNotifications(prev => prev.filter(n => n.id !== id));
+      notificationTimeouts.current.delete(id);
     }, 5000);
-  };
+    
+    // Track timeout for cleanup
+    notificationTimeouts.current.set(id, timeoutId);
+  }, []);
 
-  const removeNotification = (index: number) => {
-    setNotifications(prev => prev.filter((_, i) => i !== index));
-  };
+  const removeNotification = useCallback((id: string) => {
+    setNotifications(prev => prev.filter(n => n.id !== id));
+    
+    // Clear timeout if exists
+    const timeoutId = notificationTimeouts.current.get(id);
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      notificationTimeouts.current.delete(id);
+    }
+  }, []);
 
   const handleAddStop = (e: React.FormEvent) => {
     e.preventDefault();
+    
+    // Check if stop data is still loading
+    if (isLoadingStops) {
+      addNotification({
+        type: 'warning',
+        message: 'Please wait for stop data to load before adding stops'
+      });
+      return;
+    }
+    
+    // Check if stop data failed to load
+    if (stopLoadError) {
+      addNotification({
+        type: 'error',
+        message: 'Stop data failed to load. Please retry loading stops first.'
+      });
+      return;
+    }
+    
     // Validate stop code format
     if (!/^[0-9]{1,6}$/.test(newStopCode.trim())) {
       addNotification({
@@ -144,10 +197,25 @@ export default function Home() {
       });
       return;
     }
+    
     const trimmedCode = newStopCode.trim();
+    
+    // Check if stop exists in the system
+    if (!stopNames[trimmedCode]) {
+      addNotification({
+        type: 'error',
+        message: `Stop code "${trimmedCode}" not found in the transit system`
+      });
+      return;
+    }
+    
     if (trimmedCode && !stopCodes.includes(trimmedCode) && stopCodes.length < 15) {
       setStopCodes([...stopCodes, trimmedCode]);
       setNewStopCode('');
+      addNotification({
+        type: 'success',
+        message: `Added stop "${trimmedCode}" - ${stopNames[trimmedCode]}`
+      });
     } else if (stopCodes.includes(trimmedCode)) {
       addNotification({
         type: 'warning',
@@ -161,22 +229,90 @@ export default function Home() {
     }
   };
 
-  // Auto-add stop when user types and presses Enter or when valid code is entered
-  const handleStopCodeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Enhanced autocomplete handler
+  const handleStopCodeChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     setNewStopCode(value);
+    setSelectedSuggestionIndex(-1); // Reset selection when typing
     
-    // Auto-add if it's a valid stop code (1-6 digits) and not already added
-    if (/^[0-9]{1,6}$/.test(value.trim()) && !stopCodes.includes(value.trim()) && stopCodes.length < 15) {
-      // Add a small delay to allow user to finish typing
-      setTimeout(() => {
-        if (value === newStopCode && /^[0-9]{1,6}$/.test(value.trim())) {
-          setStopCodes([...stopCodes, value.trim()]);
-          setNewStopCode('');
-        }
-      }, 1000);
+    // Generate suggestions based on input
+    if (value.trim()) {
+      const searchTerm = value.toLowerCase();
+      const suggestions = Object.keys(stopNames)
+        .filter(code => 
+          code.includes(value) || 
+          stopNames[code].toLowerCase().includes(searchTerm)
+        )
+        .sort((a, b) => {
+          // Prioritize exact matches first
+          if (a === value) return -1;
+          if (b === value) return 1;
+          if (stopNames[a].toLowerCase().startsWith(searchTerm)) return -1;
+          if (stopNames[b].toLowerCase().startsWith(searchTerm)) return 1;
+          return 0;
+        })
+        .slice(0, 8); // Show more suggestions
+      setSuggestedStops(suggestions);
+    } else {
+      setSuggestedStops([]);
     }
-  };
+  }, [stopNames]);
+
+  // Keyboard navigation handler
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (suggestedStops.length === 0) return;
+    
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        setSelectedSuggestionIndex(prev => 
+          prev < suggestedStops.length - 1 ? prev + 1 : 0
+        );
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        setSelectedSuggestionIndex(prev => 
+          prev > 0 ? prev - 1 : suggestedStops.length - 1
+        );
+        break;
+      case 'Enter':
+        e.preventDefault();
+        if (selectedSuggestionIndex >= 0 && selectedSuggestionIndex < suggestedStops.length) {
+          const selectedCode = suggestedStops[selectedSuggestionIndex];
+          setNewStopCode(selectedCode);
+          setSuggestedStops([]);
+          setSelectedSuggestionIndex(-1);
+        }
+        break;
+      case 'Escape':
+        setSuggestedStops([]);
+        setSelectedSuggestionIndex(-1);
+        break;
+    }
+  }, [suggestedStops, selectedSuggestionIndex]);
+
+  // Auto-add effect using debounced value
+  useEffect(() => {
+    const trimmedCode = debouncedStopCode.trim();
+    
+    // Auto-add if conditions are met
+    if (trimmedCode &&
+        /^[0-9]{1,6}$/.test(trimmedCode) && 
+        !stopCodes.includes(trimmedCode) && 
+        stopCodes.length < 15 &&
+        !isLoadingStops &&
+        !stopLoadError &&
+        Object.keys(stopNames).length > 0 &&
+        stopNames[trimmedCode]) {
+      
+      setStopCodes(prev => [...prev, trimmedCode]);
+      setNewStopCode('');
+      addNotification({
+        type: 'success',
+        message: `Added stop "${trimmedCode}" - ${stopNames[trimmedCode]}`
+      });
+    }
+  }, [debouncedStopCode, stopCodes, isLoadingStops, stopLoadError, stopNames, addNotification]);
 
   const handleRemoveStop = (stopCode: string) => {
     setStopCodes(stopCodes.filter((code) => code !== stopCode));
@@ -185,6 +321,26 @@ export default function Home() {
   const handleRetryLoadStops = () => {
     setRetryCount(prev => prev + 1);
   };
+
+  // Auto-retry loading stops if they fail and user is trying to use the app
+  useEffect(() => {
+    if (stopLoadError && !isLoadingStops && stopCodes.length === 0) {
+      const retryTimer = setTimeout(() => {
+        console.log('Auto-retrying stop data load due to error...');
+        handleRetryLoadStops();
+      }, 5000); // Retry after 5 seconds
+      
+      return () => clearTimeout(retryTimer);
+    }
+  }, [stopLoadError, isLoadingStops, stopCodes.length]);
+
+  // Cleanup all notification timers on unmount
+  useEffect(() => {
+    return () => {
+      notificationTimeouts.current.forEach(timeoutId => clearTimeout(timeoutId));
+      notificationTimeouts.current.clear();
+    };
+  }, []);
 
   // Don't render until client-side initialization is complete
   if (!isClient) {
@@ -205,7 +361,7 @@ export default function Home() {
   return (
     <ErrorBoundary>
       <main className="min-h-screen p-4 md:p-8 bg-gray-50">
-        <div className="max-w-4xl mx-auto">
+        <div className="max-w-7xl mx-auto">
           <h1 className="text-3xl font-bold text-blue-700 mb-8">
             Barrie Transit Live Departures
           </h1>
@@ -213,9 +369,9 @@ export default function Home() {
           {/* Notifications */}
           {notifications.length > 0 && (
             <div className="mb-6 space-y-2">
-              {notifications.map((notification, index) => (
+              {notifications.map((notification) => (
                 <div
-                  key={index}
+                  key={notification.id || `${notification.type}-${notification.message}`}
                   className={`p-4 rounded-lg border flex items-center justify-between ${
                     notification.type === 'error'
                       ? 'bg-red-50 border-red-200 text-red-800'
@@ -239,7 +395,7 @@ export default function Home() {
                     )}
                   </div>
                   <button
-                    onClick={() => removeNotification(index)}
+                    onClick={() => removeNotification(notification.id || '')}
                     className="text-gray-500 hover:text-gray-700 text-xl font-bold"
                   >
                     ×
@@ -249,36 +405,91 @@ export default function Home() {
             </div>
           )}
 
-          <div className="grid gap-8">
-            <div className="bg-white shadow-lg rounded-lg p-6">
-              <h2 className="text-2xl font-bold text-blue-700 mb-4">Add Stop Code (max 15)</h2>
-              <form onSubmit={handleAddStop} className="space-y-4">
-                <div>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      id="stopCode"
-                      value={newStopCode}
-                      onChange={handleStopCodeChange}
-                      className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      placeholder="Enter stop code"
-                      aria-label="Stop Code"
-                      disabled={stopCodes.length >= 15}
-                    />
+          <div className="grid gap-4">
+            <div className="bg-white shadow-lg rounded-lg p-2 mb-1">
+              <h2 className="text-xl font-bold text-barrie-blue mb-2">
+                Add Stop Code
+                {isLoadingStops && <span className="text-sm font-normal text-gray-500 ml-2">- Loading stops...</span>}
+              </h2>
+              <form onSubmit={handleAddStop} className="space-y-2">
+                <div className="relative">
+                  <div className="flex gap-1 items-center">
+                    <div className="relative flex-1">
+                      <input
+                        type="text"
+                        id="stopCode"
+                        value={newStopCode}
+                        onChange={handleStopCodeChange}
+                        onKeyDown={handleKeyDown}
+                        className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-barrie-blue focus:border-barrie-blue disabled:opacity-50"
+                        placeholder={isLoadingStops ? "Loading stops..." : "Type stop code or name..."}
+                        aria-label="Stop Code or Name"
+                        disabled={stopCodes.length >= 15 || isLoadingStops}
+                        autoComplete="off"
+                      />
+                      
+                      {/* Autocomplete dropdown */}
+                      {suggestedStops.length > 0 && newStopCode.trim() && (
+                        <div className="absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-y-auto">
+                          {suggestedStops.map((code, index) => (
+                            <button
+                              key={code}
+                              type="button"
+                              className={`w-full px-3 py-2 text-left text-sm focus:outline-none ${
+                                index === selectedSuggestionIndex 
+                                  ? 'bg-barrie-blue text-white' 
+                                  : 'hover:bg-gray-100'
+                              } ${
+                                index === 0 ? 'rounded-t-md' : ''
+                              } ${index === suggestedStops.length - 1 ? 'rounded-b-md' : ''}`}
+                              onClick={() => {
+                                setNewStopCode(code);
+                                setSuggestedStops([]);
+                                setSelectedSuggestionIndex(-1);
+                              }}
+                              onMouseEnter={() => setSelectedSuggestionIndex(index)}
+                            >
+                              <div className="flex justify-between items-center">
+                                <span className={`font-medium ${
+                                  index === selectedSuggestionIndex ? 'text-white' : 'text-gray-900'
+                                }`}>{code}</span>
+                                <span className={`text-xs ${
+                                  index === selectedSuggestionIndex ? 'text-blue-100' : 'text-gray-500'
+                                }`}>{stopNames[code]}</span>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    
                     <button
                       type="submit"
-                      className="px-4 py-2 bg-blue-700 text-white rounded-lg hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50"
-                      disabled={!newStopCode || stopCodes.length >= 15}
+                      className="px-4 py-2 text-sm bg-barrie-blue text-white rounded hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-barrie-blue disabled:opacity-50"
+                      disabled={!newStopCode || stopCodes.length >= 15 || isLoadingStops || !!stopLoadError}
                     >
-                      Add Stop
+                      {isLoadingStops ? 'Loading...' : 'Add'}
                     </button>
+                  </div>
+                  
+                  {/* Help text */}
+                  <div className="mt-1 text-xs text-gray-500">
+                    Type a stop code (e.g., "330") or stop name (e.g., "Georgian") to see suggestions
                   </div>
                 </div>
               </form>
 
               {stopCodes.length > 0 && (
                 <div className="mt-4">
-                  <h3 className="text-gray-700 mb-2">Monitored Stops</h3>
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-gray-700">Monitored Stops</h3>
+                    <button
+                      onClick={() => setStopCodes([])}
+                      className="px-3 py-1 bg-black text-white text-sm rounded hover:bg-gray-800"
+                    >
+                      Start Fresh
+                    </button>
+                  </div>
                   <div className="flex flex-wrap gap-2">
                     {stopCodes.map((code) => (
                       <div
@@ -333,7 +544,9 @@ export default function Home() {
                   </div>
                 </div>
               }>
-                <TransitBoard stopCodes={stopCodes} stopNames={stopNames} refreshInterval={refreshInterval} />
+                <div className="mt-2" style={{ maxHeight: '700px', minHeight: '400px' }}>
+                  <TransitBoard stopCodes={stopCodes} stopNames={stopNames} refreshInterval={refreshInterval} />
+                </div>
               </ErrorBoundary>
             ) : (
               <div className="bg-white shadow-lg rounded-lg p-6">

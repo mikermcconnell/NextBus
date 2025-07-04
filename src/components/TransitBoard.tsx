@@ -6,6 +6,8 @@ import Image from 'next/image';
 import LoadingSpinner from './LoadingSpinner';
 import ConnectionStatus from './ConnectionStatus';
 import ErrorBoundary from './ErrorBoundary';
+import { GTFSFeedMessage } from '@/types/gtfs';
+import { extractTimestamp, formatDataAge, calculateDataAge } from '@/utils/timestamp';
 
 // Import GTFS realtime bindings for protobuf parsing
 const GtfsRealtimeBindings = require('gtfs-realtime-bindings');
@@ -41,6 +43,8 @@ interface StopData {
     delay: number;
     stopCode: string;
     stopName: string;
+    platform?: string | number;
+    isRealtime: boolean;
   }>;
   error?: string;
   lastUpdate?: Date;
@@ -53,6 +57,9 @@ interface CombinedArrival {
   delay: number;
   stopCode: string;
   stopName: string;
+  platform?: string | number;
+  isRealtime: boolean;
+  gtfsTripId?: string; // GTFS trip ID for matching real-time vs static data
 }
 
 const fetcher = async (url: string) => {
@@ -63,10 +70,12 @@ const fetcher = async (url: string) => {
   return response.json();
 };
 
+
+
 export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: TransitBoardProps) {
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [lastGlobalUpdate, setLastGlobalUpdate] = useState<Date | null>(null);
-  const [parsedRealtimeData, setParsedRealtimeData] = useState<any>(null);
+  const [parsedRealtimeData, setParsedRealtimeData] = useState<GTFSFeedMessage | null>(null);
 
   // Fetch GTFS static data for stop names
   const { data: staticData, error: staticError } = useSWR('/api/gtfs-static', fetcher, {
@@ -83,6 +92,9 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
       refreshInterval: 15000, // Auto-refresh every 15 seconds
       revalidateOnFocus: true,
       revalidateOnReconnect: true,
+      errorRetryCount: 3,
+      errorRetryInterval: 5000,
+      shouldRetryOnError: true,
       onSuccess: (data) => {
         setLastGlobalUpdate(new Date());
         setConnectionError(null);
@@ -95,22 +107,30 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
             const feed = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(binaryData);
             setParsedRealtimeData(feed);
             
-            // Debug: Log some sample stop IDs from the real-time data
-            const sampleStopIds = new Set<string>();
-            feed.entity?.slice(0, 5).forEach((entity: any) => {
-              if (entity.tripUpdate?.stopTimeUpdate) {
-                entity.tripUpdate.stopTimeUpdate.forEach((stopUpdate: any) => {
-                  if (stopUpdate.stopId) {
-                    sampleStopIds.add(stopUpdate.stopId);
-                  }
-                });
+            // Check for stale data
+            const feedTimestamp = feed.header?.timestamp;
+            let isStale = false;
+            let dataAge = 0;
+            
+            if (feedTimestamp) {
+              try {
+                dataAge = calculateDataAge(feedTimestamp);
+                isStale = dataAge > 30; // Consider data stale if older than 30 minutes
+                
+                if (isStale) {
+                  const ageString = formatDataAge(dataAge);
+                  setConnectionError(`Real-time data is ${ageString} old. Service information may not be current.`);
+                }
+              } catch (error) {
+                console.warn('Failed to process feed timestamp:', error);
               }
-            });
+            }
             
             console.log('GTFS real-time data parsed successfully:', {
               entityCount: feed.entity?.length || 0,
-              timestamp: feed.header?.timestamp,
-              sampleStopIds: Array.from(sampleStopIds).slice(0, 10),
+              timestamp: feedTimestamp,
+              dataAge: `${dataAge} minutes`,
+              isStale: isStale,
               autoRefresh: true
             });
           } catch (parseError) {
@@ -127,22 +147,14 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
   );
 
   const processStopData = useCallback((stopCode: string): StopData => {
-    const arrivals: Array<{
-      routeId: string;
-      tripId: string;
-      arrivalTime: number;
-      delay: number;
-      stopCode: string;
-      stopName: string;
-    }> = [];
+    let staticArrivals: Array<CombinedArrival> = [];
+    let realtimeArrivals: Array<CombinedArrival> = [];
 
     if (staticData?.success) {
       try {
         // First, find the stop_id that corresponds to this stop_code
         const stopInfo = staticData.data.stops.find((stop: any) => stop.stop_code === stopCode);
-        
         if (!stopInfo) {
-          console.log(`No stop found for code: ${stopCode}`);
           return {
             stopCode,
             arrivals: [],
@@ -150,55 +162,76 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
             lastUpdate: lastGlobalUpdate || undefined,
           };
         }
-
         const stopId = stopInfo.stop_id;
         const stopName = stopNames[stopCode] || stopInfo.stop_name || 'Unknown Stop';
-        console.log(`Processing stop ${stopCode} (ID: ${stopId})`);
-
         const now = Date.now();
+        // 1. Build static arrivals
+        const stopTimes = staticData.data.stopTimes?.filter((st: any) => st.stop_id === stopId) || [];
+        stopTimes.forEach((stopTime: any) => {
+          const tripInfo = staticData.data.trips.find((trip: any) => trip.trip_id === stopTime.trip_id);
+          if (tripInfo) {
+            const routeInfo = staticData.data.routes.find((route: any) => route.route_id === tripInfo.route_id);
+            const readableRouteNumber = routeInfo?.route_short_name || tripInfo.route_id;
+            const headsign = tripInfo.trip_headsign || 'Unknown Destination';
+            const timeStr = stopTime.arrival_time || stopTime.departure_time;
+            if (timeStr) {
+              const [hours, minutes, seconds] = timeStr.split(':').map(Number);
+              const scheduledTime = new Date();
+              scheduledTime.setHours(hours, minutes, seconds, 0);
+              if (hours >= 24) {
+                scheduledTime.setHours(hours - 24, minutes, seconds, 0);
+                scheduledTime.setDate(scheduledTime.getDate() + 1);
+              }
+              if (scheduledTime.getTime() < now) {
+                scheduledTime.setDate(scheduledTime.getDate() + 1);
+              }
+              const minutesUntilArrival = Math.floor((scheduledTime.getTime() - now) / (1000 * 60));
+              if (minutesUntilArrival >= -1 && minutesUntilArrival <= 60) {
+                staticArrivals.push({
+                  routeId: readableRouteNumber,
+                  tripId: headsign,
+                  arrivalTime: scheduledTime.getTime(),
+                  delay: 0,
+                  stopCode: stopCode,
+                  stopName: stopName,
+                  platform: stopTime.platform_code || undefined,
+                  isRealtime: false,
+                  gtfsTripId: tripInfo.trip_id // Store the actual GTFS trip ID for matching
+                });
+              }
+            }
+          }
+        });
+        // 2. Build real-time arrivals and supercede static ones by trip_id
         const realtimeTripIds = new Set<string>();
-
-        // First, process real-time data if available
-        let realtimeCount = 0;
         if (parsedRealtimeData?.entity) {
           parsedRealtimeData.entity.forEach((entity: any) => {
             if (entity.tripUpdate?.stopTimeUpdate) {
               entity.tripUpdate.stopTimeUpdate.forEach((stopUpdate: any) => {
-                // Now compare with the actual stop_id from GTFS
                 if (stopUpdate.stopId === stopId) {
-                  realtimeCount++;
                   const arrivalTime = stopUpdate.arrival?.time || stopUpdate.departure?.time;
                   if (arrivalTime) {
                     const arrivalTimeMs = arrivalTime * 1000;
                     const minutesUntilArrival = Math.floor((arrivalTimeMs - now) / (1000 * 60));
-                    
-                    // Only include trips that haven't departed yet (at least -1 minute buffer)
-                    // and are within the next 60 minutes
-                    console.log(`Real-time trip: ${entity.tripUpdate.trip?.tripId}, minutes until arrival: ${minutesUntilArrival}`);
+                    const gtfsRouteId = entity.tripUpdate.trip?.routeId || 'Unknown';
+                    const gtfsTripId = entity.tripUpdate.trip?.tripId || 'Unknown';
+                    const routeInfo = staticData.data.routes.find((route: any) => route.route_id === gtfsRouteId);
+                    const readableRouteNumber = routeInfo?.route_short_name || gtfsRouteId;
+                    const tripInfo = staticData.data.trips.find((trip: any) => trip.trip_id === gtfsTripId);
+                    const headsign = tripInfo?.trip_headsign || 'Unknown Destination';
+                    const delay = stopUpdate.arrival?.delay || stopUpdate.departure?.delay || 0;
                     if (minutesUntilArrival >= -1 && minutesUntilArrival <= 60) {
-                      const gtfsRouteId = entity.tripUpdate.trip?.routeId || 'Unknown';
-                      const gtfsTripId = entity.tripUpdate.trip?.tripId || 'Unknown';
-                      
-                      // Track which trips we have real-time data for
                       realtimeTripIds.add(gtfsTripId);
-                      
-                      // Find the readable route number from static data
-                      const routeInfo = staticData.data.routes.find((route: any) => route.route_id === gtfsRouteId);
-                      const readableRouteNumber = routeInfo?.route_short_name || gtfsRouteId;
-                      
-                      // Find trip information for headsign
-                      const tripInfo = staticData.data.trips.find((trip: any) => trip.trip_id === gtfsTripId);
-                      const headsign = tripInfo?.trip_headsign || 'Unknown Destination';
-                      
-                      const delay = stopUpdate.arrival?.delay || stopUpdate.departure?.delay || 0;
-                      
-                      arrivals.push({
+                      realtimeArrivals.push({
                         routeId: readableRouteNumber,
                         tripId: headsign,
                         arrivalTime: arrivalTimeMs,
                         delay: delay,
                         stopCode: stopCode,
-                        stopName: stopName
+                        stopName: stopName,
+                        platform: stopUpdate.arrival?.platform || undefined,
+                        isRealtime: true,
+                        gtfsTripId: gtfsTripId // Store the actual GTFS trip ID for matching
                       });
                     }
                   }
@@ -207,74 +240,21 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
             }
           });
         }
-
-        // Add scheduled trips from static data for routes not covered by real-time data
-        const stopTimes = staticData.data.stop_times?.filter((st: any) => st.stop_id === stopId) || [];
-        
-        // Process scheduled trips
-        let scheduledCount = 0;
-        stopTimes.forEach((stopTime: any) => {
-          // Skip if we already have real-time data for this trip
-          if (realtimeTripIds.has(stopTime.trip_id)) {
-            return;
-          }
-
-          const tripInfo = staticData.data.trips.find((trip: any) => trip.trip_id === stopTime.trip_id);
-          if (tripInfo) {
-            const routeInfo = staticData.data.routes.find((route: any) => route.route_id === tripInfo.route_id);
-            const readableRouteNumber = routeInfo?.route_short_name || tripInfo.route_id;
-            const headsign = tripInfo.trip_headsign || 'Unknown Destination';
-            
-            // Convert scheduled time to timestamp
-            const timeStr = stopTime.arrival_time || stopTime.departure_time;
-            if (timeStr) {
-              const [hours, minutes, seconds] = timeStr.split(':').map(Number);
-              const scheduledTime = new Date();
-              scheduledTime.setHours(hours, minutes, seconds, 0);
-              
-              // Handle times after midnight (e.g., 24:30:00 becomes 00:30:00 next day)
-              if (hours >= 24) {
-                scheduledTime.setHours(hours - 24, minutes, seconds, 0);
-                scheduledTime.setDate(scheduledTime.getDate() + 1);
-              }
-              
-              // If the scheduled time is in the past, assume it's tomorrow
-              if (scheduledTime.getTime() < now) {
-                scheduledTime.setDate(scheduledTime.getDate() + 1);
-              }
-              
-              const minutesUntilArrival = Math.floor((scheduledTime.getTime() - now) / (1000 * 60));
-              
-              console.log(`Scheduled trip: ${stopTime.trip_id}, route: ${readableRouteNumber}, time: ${timeStr}, minutes until arrival: ${minutesUntilArrival}`);
-              
-              // Apply strict 60-minute window filter
-              if (minutesUntilArrival >= -1 && minutesUntilArrival <= 60) {
-                scheduledCount++;
-                arrivals.push({
-                  routeId: readableRouteNumber,
-                  tripId: headsign,
-                  arrivalTime: scheduledTime.getTime(),
-                  delay: 0, // No delay info for scheduled trips
-                  stopCode: stopCode,
-                  stopName: stopName
-                });
-              }
-            }
-          }
-        });
-
-        console.log(`Stop ${stopCode}: ${realtimeCount} real-time arrivals, ${scheduledCount} scheduled arrivals, ${arrivals.length} total within 60 minutes`);
-
-        // Sort arrivals by time
+        // 3. Supercede static arrivals with real-time ones by GTFS trip_id
+        const arrivals = [
+          ...realtimeArrivals,
+          ...staticArrivals.filter(staticArrival => {
+            // Only include static arrival if there's no real-time data for this GTFS trip
+            return !staticArrival.gtfsTripId || !realtimeTripIds.has(staticArrival.gtfsTripId);
+          })
+        ];
         arrivals.sort((a, b) => a.arrivalTime - b.arrivalTime);
-
         return {
           stopCode,
-          arrivals: arrivals, // Show all arrivals within 60 minutes
+          arrivals,
           lastUpdate: lastGlobalUpdate || undefined,
         };
       } catch (error) {
-        console.error(`Error processing stop ${stopCode}:`, error);
         return {
           stopCode,
           arrivals: [],
@@ -283,7 +263,6 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
         };
       }
     }
-
     return {
       stopCode,
       arrivals: [],
@@ -342,7 +321,7 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
     return null;
   };
 
-  const formatArrivalTimeOfficial = (timestamp: number, delay: number = 0) => {
+  const formatArrivalTimeOfficial = (timestamp: number, delay: number = 0, isRealtime: boolean = false) => {
     const arrivalTime = new Date(timestamp + delay * 1000);
     const now = new Date();
     const diffMs = arrivalTime.getTime() - now.getTime();
@@ -351,21 +330,29 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
     if (diffMinutes < 0) {
       return (
         <div className="flex items-center gap-1">
-          <span className="font-bold text-red-600">Departed</span>
+          <span className="font-bold text-gray-400">-</span>
         </div>
       );
     } else if (diffMinutes === 0) {
       return (
         <div className="flex items-center gap-1">
-          <span className="font-bold text-blue-900">Now</span>
-          <span className="inline-block w-4 h-3 bg-blue-500 rounded-sm"></span>
+          <span className="font-bold text-barrie-blue">Now</span>
+          {isRealtime ? (
+            <span className="inline-block w-4 h-3 bg-barrie-blue rounded-sm"></span>
+          ) : (
+            <span className="inline-block w-4 h-3 border-2 border-gray-400 rounded-sm"></span>
+          )}
         </div>
       );
     } else {
       return (
         <div className="flex items-center gap-1">
-          <span className="font-bold text-blue-900">{diffMinutes} min</span>
-          <span className="inline-block w-4 h-3 bg-blue-500 rounded-sm"></span>
+          <span className="font-bold text-barrie-blue">{diffMinutes} min</span>
+          {isRealtime ? (
+            <span className="inline-block w-4 h-3 bg-barrie-blue rounded-sm"></span>
+          ) : (
+            <span className="inline-block w-4 h-3 border-2 border-gray-400 rounded-sm"></span>
+          )}
         </div>
       );
     }
@@ -375,25 +362,12 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
     mutate();
   };
 
-  const getPlatformForRoute = (routeId: string): number => {
-    // Map route numbers to platforms similar to the official site
-    const routePlatformMap: Record<string, number> = {
-      '2': 7, '7': 2, '8': 4, '10': 6, '11': 8, '12': 5,
-      '100': 4, '101': 13, '68': 1
-    };
-    
-    // Extract numeric part from route ID
-    const numericRoute = routeId.replace(/[AB]/g, '');
-    
-    return routePlatformMap[numericRoute] || Math.floor(Math.random() * 13) + 1;
-  };
-
   // Show loading state during initial load
   if (isLoading && !realtimeData) {
     return (
       <div className="bg-white shadow-lg rounded-lg p-6">
         <div className="flex justify-between items-center mb-6">
-          <h2 className="text-2xl font-bold text-blue-700">Live Departures</h2>
+          <h2 className="text-2xl font-bold text-barrie-blue">Live Departures</h2>
           <ConnectionStatus isConnected={false} />
         </div>
         <LoadingSpinner message="Loading departure times..." />
@@ -406,7 +380,7 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
     return (
       <div className="bg-white shadow-lg rounded-lg p-6">
         <div className="flex justify-between items-center mb-6">
-          <h2 className="text-2xl font-bold text-blue-700">Live Departures</h2>
+          <h2 className="text-2xl font-bold text-barrie-blue">Live Departures</h2>
           <ConnectionStatus isConnected={false} error="Connection failed" />
         </div>
         <div className="text-center py-8">
@@ -417,7 +391,7 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
           </div>
           <button
             onClick={handleRefresh}
-            className="mt-4 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+            className="mt-4 px-4 py-2 bg-barrie-blue text-white rounded hover:bg-barrie-blue"
           >
             Try Again
           </button>
@@ -431,13 +405,13 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
   return (
     <div className="bg-white shadow-lg rounded-lg overflow-hidden">
       {/* Header matching official site */}
-      <div className="bg-blue-900 text-white px-6 py-4">
+      <div className="bg-barrie-blue text-white px-6 py-4">
         <div className="flex justify-between items-center">
           <div>
             <h1 className="text-xl font-bold">Transit Departure Times</h1>
             <h2 className="text-lg">
               {stopCodes.length === 1 
-                ? stopNames[stopCodes[0]] || `Stop ${stopCodes[0]}`
+                ? `${stopCodes[0]} - ${stopNames[stopCodes[0]]}` || `Stop ${stopCodes[0]}`
                 : `${stopCodes.length} Stops Selected`
               }
             </h2>
@@ -447,8 +421,17 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
               {lastGlobalUpdate ? lastGlobalUpdate.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : '--:--'}
             </div>
             <div className="flex items-center gap-2 text-sm">
-              <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-              <span>Auto-refresh every 15s</span>
+              {connectionError && connectionError.includes('old') ? (
+                <>
+                  <div className="w-2 h-2 bg-yellow-400 rounded-full"></div>
+                  <span>Data may be stale</span>
+                </>
+              ) : (
+                <>
+                  <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                  <span>Auto-refresh every 15s</span>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -456,14 +439,14 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
 
       {/* Table header matching official site */}
       <div className="bg-gray-100 border-b border-gray-300">
-        <div className="grid grid-cols-7 gap-2 px-4 py-3 text-sm font-semibold text-gray-700" style={{gridTemplateColumns: "60px 80px 1fr 120px 60px 80px 80px"}}>
-          <div>Route #</div>
-          <div>Service</div>
-          <div>Route</div>
-          <div>Stop</div>
-          <div>Platform</div>
-          <div>Arrives</div>
-          <div>Departs</div>
+        <div className="grid grid-cols-7 gap-2 px-4 py-3 text-sm font-semibold text-gray-700 text-center items-center" style={{gridTemplateColumns: "1fr 1fr 2fr 2fr 0.8fr 1fr 1fr"}}>
+          <div className="flex items-center justify-center">Service</div>
+          <div className="flex items-center justify-center">Route #</div>
+          <div className="flex items-center justify-center">Route</div>
+          <div className="flex items-center justify-center">Stop</div>
+          <div className="flex items-center justify-center">Platform</div>
+          <div className="flex items-center justify-center">Arrives</div>
+          <div className="flex items-center justify-center">Departs</div>
         </div>
       </div>
 
@@ -476,13 +459,8 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
               className={`grid grid-cols-7 gap-2 px-4 py-3 border-b border-gray-200 hover:bg-gray-50 ${
                 index % 2 === 0 ? 'bg-white' : 'bg-gray-50'
               }`}
-              style={{gridTemplateColumns: "60px 80px 1fr 120px 60px 80px 80px"}}
+              style={{gridTemplateColumns: "1fr 1fr 2fr 2fr 0.8fr 1fr 1fr"}}
             >
-              {/* Route # */}
-              <div className="font-bold text-lg text-blue-900 flex items-center transit-route-cell">
-                {arrival.routeId}
-              </div>
-              
               {/* Service - Logo based on route type */}
               <div className="flex items-center justify-center">
                 {arrival.routeId.includes('68') ? (
@@ -495,49 +473,46 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
                   />
                 ) : (
                   <Image 
-                    src="/barrie-transit-logo.svg" 
+                    src="/barrie-transit-logo.png" 
                     alt="Barrie Transit" 
-                    width={40}
-                    height={20}
+                    width={80}
+                    height={40}
                     className="object-contain"
                   />
                 )}
               </div>
+              {/* Route # */}
+              <div className="font-bold text-lg text-barrie-blue flex items-center justify-center transit-route-cell">
+                {arrival.routeId}
+              </div>
               
               {/* Route destination */}
-              <div className="font-medium text-gray-900 text-sm leading-tight transit-destination-cell">
-                <div className="break-words overflow-hidden">
-                  {arrival.tripId.length > 30 ? 
-                    `${arrival.tripId.substring(0, 30)}...` : 
-                    arrival.tripId
-                  }
+              <div className="font-medium text-gray-900 text-sm leading-tight transit-destination-cell flex items-center justify-center h-full">
+                <div className="break-words whitespace-normal text-center max-h-10 overflow-hidden w-full">
+                  {arrival.tripId.includes('Red Express') ? 'Red' : arrival.tripId.split(' to')[0].trim()}
                 </div>
               </div>
-              
+
               {/* Stop Name */}
-              <div className="text-xs leading-tight transit-stop-cell">
-                <div className="font-medium text-gray-900 break-words overflow-hidden">
-                  {arrival.stopName.length > 20 ? 
-                    `${arrival.stopName.substring(0, 20)}...` : 
-                    arrival.stopName
-                  }
+              <div className="text-xs leading-tight transit-stop-cell flex items-center justify-center h-full">
+                <div className="font-medium text-gray-900 break-words whitespace-normal text-center max-h-10 overflow-hidden w-full">
+                  {arrival.stopCode} - {arrival.stopName}
                 </div>
-                <div className="text-gray-500 text-xs">#{arrival.stopCode}</div>
               </div>
               
-              {/* Platform - generate platform number based on route */}
+              {/* Platform - only show if present, otherwise '-' */}
               <div className="text-center font-medium flex items-center justify-center transit-table-cell">
-                {getPlatformForRoute(arrival.routeId)}
+                {(arrival.platform !== undefined && arrival.platform !== null && arrival.platform !== '') ? arrival.platform : '-'}
               </div>
               
               {/* Arrives */}
-              <div className="font-bold flex items-center transit-table-cell">
-                {formatArrivalTimeOfficial(arrival.arrivalTime, arrival.delay)}
+              <div className="font-bold flex items-center justify-center transit-table-cell">
+                {formatArrivalTimeOfficial(arrival.arrivalTime, arrival.delay, arrival.isRealtime)}
               </div>
               
               {/* Departs */}
-              <div className="font-bold flex items-center transit-table-cell">
-                {formatArrivalTimeOfficial(arrival.arrivalTime + 60000, arrival.delay)} {/* +1 min for depart */}
+              <div className="font-bold flex items-center justify-center transit-table-cell">
+                {formatArrivalTimeOfficial(arrival.arrivalTime + 60000, arrival.delay, arrival.isRealtime)} {/* +1 min for depart */}
               </div>
             </div>
           ))
@@ -548,8 +523,26 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
             ) : (
               <div>
                 <div className="text-2xl mb-2">🚌</div>
-                <p>No upcoming departures</p>
-                <p className="text-xs mt-1">Data updates every 15 seconds</p>
+                <p className="font-medium">No upcoming departures</p>
+                {connectionError && connectionError.includes('old') ? (
+                  <div className="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded text-sm">
+                    <div className="text-yellow-800">
+                      <div className="font-medium">⚠️ Data may be outdated</div>
+                      <div className="mt-1">{connectionError}</div>
+                      <div className="mt-2 text-xs">
+                        This could mean: No current service, weekend schedule, or feed server issues.
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-xs mt-2 text-gray-400">
+                    <div>Possible reasons:</div>
+                    <div>• No service at this time</div>
+                    <div>• End of service day</div>
+                    <div>• Weekend/holiday schedule</div>
+                    <div className="mt-2">Data updates every 15 seconds</div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -558,9 +551,31 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
 
       {/* Footer note */}
       <div className="bg-gray-100 px-6 py-2 text-xs text-gray-600 border-t border-gray-300">
-        <div className="flex items-center gap-2">
-          <span className="inline-block w-3 h-3 bg-blue-500 rounded-full"></span>
-          <span>Real-time departure information - Showing {combinedArrivals.length} upcoming departures</span>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <span className="inline-block w-4 h-3 bg-barrie-blue rounded-sm"></span>
+              <span>Real-time</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="inline-block w-4 h-3 border-2 border-gray-400 rounded-sm"></span>
+              <span>Static schedule</span>
+            </div>
+            <span className="text-gray-500">
+              {connectionError && connectionError.includes('old') 
+                ? 'Data may be outdated'
+                : `Showing ${combinedArrivals.length} upcoming departures`
+              }
+            </span>
+          </div>
+          {connectionError && connectionError.includes('old') && (
+            <button
+              onClick={handleRefresh}
+              className="text-barrie-blue hover:text-barrie-blue font-medium"
+            >
+              Refresh
+            </button>
+          )}
         </div>
       </div>
 

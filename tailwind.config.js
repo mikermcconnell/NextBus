@@ -10,6 +10,7 @@ module.exports = {
       colors: {
         'transit-blue': '#005DAA',
         'transit-gray': '#4A4A4A',
+        'barrie-blue': 'rgb(0,74,128)',
       },
     },
   },
