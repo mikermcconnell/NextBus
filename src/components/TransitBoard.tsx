@@ -239,20 +239,25 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
           });
         }
         // 3. Merge arrivals: prefer real-time, only show static if no real-time for that trip
-        const arrivalMap = new Map<string, CombinedArrival>();
+        // Group by (routeId, tripId, stopCode) and keep only the soonest arrival (real-time preferred)
+        type ArrivalKey = string;
+        const makeKey = (a: CombinedArrival): ArrivalKey => `${a.routeId}|${a.tripId}|${a.stopCode}`;
+        const grouped: Record<ArrivalKey, CombinedArrival> = {};
         // Add all real-time arrivals first
         for (const rt of realtimeArrivals) {
-          if (rt.gtfsTripId) {
-            arrivalMap.set(rt.gtfsTripId, rt);
+          const key = makeKey(rt);
+          if (!grouped[key] || rt.arrivalTime < grouped[key].arrivalTime) {
+            grouped[key] = rt;
           }
         }
-        // Add static arrivals only if not already present
+        // Add static arrivals only if not already present or if earlier than existing
         for (const st of staticArrivals) {
-          if (st.gtfsTripId && !arrivalMap.has(st.gtfsTripId)) {
-            arrivalMap.set(st.gtfsTripId, st);
+          const key = makeKey(st);
+          if (!grouped[key] || st.arrivalTime < grouped[key].arrivalTime) {
+            grouped[key] = st;
           }
         }
-        const arrivals = Array.from(arrivalMap.values());
+        const arrivals = Object.values(grouped);
         arrivals.sort((a, b) => a.arrivalTime - b.arrivalTime);
         return {
           stopCode,
