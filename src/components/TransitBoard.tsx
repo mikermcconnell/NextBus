@@ -202,8 +202,7 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
             }
           }
         });
-        // 2. Build real-time arrivals and supercede static ones by trip_id
-        const realtimeTripIds = new Set<string>();
+        // 2. Build real-time arrivals
         if (parsedRealtimeData?.entity) {
           parsedRealtimeData.entity.forEach((entity: any) => {
             if (entity.tripUpdate?.stopTimeUpdate) {
@@ -221,7 +220,6 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
                     const headsign = tripInfo?.trip_headsign || 'Unknown Destination';
                     const delay = stopUpdate.arrival?.delay || stopUpdate.departure?.delay || 0;
                     if (minutesUntilArrival >= -1 && minutesUntilArrival <= 60) {
-                      realtimeTripIds.add(gtfsTripId);
                       realtimeArrivals.push({
                         routeId: readableRouteNumber,
                         tripId: headsign,
@@ -240,14 +238,21 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
             }
           });
         }
-        // 3. Supercede static arrivals with real-time ones by GTFS trip_id
-        const arrivals = [
-          ...realtimeArrivals,
-          ...staticArrivals.filter(staticArrival => {
-            // Only include static arrival if there's no real-time data for this GTFS trip
-            return !staticArrival.gtfsTripId || !realtimeTripIds.has(staticArrival.gtfsTripId);
-          })
-        ];
+        // 3. Merge arrivals: prefer real-time, only show static if no real-time for that trip
+        const arrivalMap = new Map<string, CombinedArrival>();
+        // Add all real-time arrivals first
+        for (const rt of realtimeArrivals) {
+          if (rt.gtfsTripId) {
+            arrivalMap.set(rt.gtfsTripId, rt);
+          }
+        }
+        // Add static arrivals only if not already present
+        for (const st of staticArrivals) {
+          if (st.gtfsTripId && !arrivalMap.has(st.gtfsTripId)) {
+            arrivalMap.set(st.gtfsTripId, st);
+          }
+        }
+        const arrivals = Array.from(arrivalMap.values());
         arrivals.sort((a, b) => a.arrivalTime - b.arrivalTime);
         return {
           stopCode,

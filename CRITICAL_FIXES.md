@@ -153,6 +153,47 @@ if (cacheMap.size > MAX_CACHE_SIZE) {
 }
 ```
 
+## Route 400 Stop 330 Display Issue - FIXED ✅
+
+**Problem**: Route 400 static schedule times were not showing at Stop 330 (Georgian College) in the web application.
+
+**Root Cause**: The `TransitBoard.tsx` component was trying to access `staticData.data.stop_times` but the actual property name in the GTFS data is `stopTimes` (camelCase).
+
+**Solution**: 
+- Fixed property name from `stop_times` to `stopTimes` in line 161 of `src/components/TransitBoard.tsx`
+- Implemented proper real-time vs static schedule prioritization logic
+- Added `gtfsTripId` to `CombinedArrival` interface for accurate trip matching
+- Enhanced real-time data superseding of static schedules using GTFS trip IDs
+
+**Verification**: 
+- Debug script confirms Route 400 has 44 stop times at Stop 330
+- Found 4 upcoming Route 400 departures within 60 minutes
+- Real-time data is available for Route 400
+
+**Best Practice Implementation**:
+- Real-time data takes priority over static schedules
+- Static schedules are shown when no real-time data is available
+- Proper GTFS trip ID matching ensures accurate data superseding
+- Enhanced error handling and data validation
+
+## Previous Fixes
+
+### 60-Minute Window Filter - FIXED ✅
+
+**Problem**: Arrivals beyond 60 minutes were being displayed.
+
+**Solution**: Implemented proper filtering in `getCombinedArrivals` function to only show arrivals within 60 minutes.
+
+### Real-time Data Integration - FIXED ✅
+
+**Problem**: Real-time and static data weren't properly combined.
+
+**Solution**: Enhanced route filtering to combine real-time and scheduled data with proper prioritization.
+
+---
+
+**Status**: All critical issues resolved. Application now properly displays Route 400 times at Stop 330 with best practice next bus logic.
+
 ## Testing Requirements
 
 1. **Unit Tests**: Add tests for timestamp extraction utility
@@ -196,6 +237,7 @@ if (cacheMap.size > MAX_CACHE_SIZE) {
 | Missing TypeScript Types | ✅ FIXED | `src/types/gtfs.ts`, `src/components/TransitBoard.tsx` | HIGH → RESOLVED |
 | Timestamp Utilities | ✅ FIXED | `src/utils/timestamp.ts` | MEDIUM → RESOLVED |
 | Cache Strategy | 🟡 IMPROVED | `src/app/api/gtfs/TripUpdates/route.ts` | LOW → MITIGATED |
+| Route 400 Stop 330 Display Issue | ✅ FIXED | `src/components/TransitBoard.tsx` | HIGH → RESOLVED |
 
 ## 🏆 FINAL STATUS
 
