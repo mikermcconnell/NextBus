@@ -66,6 +66,8 @@ export function useStopProcessing({ stopCodes, stopNames, staticData, realtimeFe
         let direction: Direction | undefined;
         if (routeShort === '8A' || routeShort === '8B' || routeShort === '400') {
           direction = infer8Direction(routeShort, headsign);
+        } else if (tripInfo.direction_id !== undefined) {
+          direction = tripInfo.direction_id === '0' ? 'outbound' : 'inbound';
         }
 
         staticArr.push({
@@ -103,6 +105,8 @@ export function useStopProcessing({ stopCodes, stopNames, staticData, realtimeFe
             let direction: Direction | undefined;
             if (routeShort === '8A' || routeShort === '8B' || routeShort === '400') {
               direction = infer8Direction(routeShort, headsign);
+            } else if (tripInfo && tripInfo.direction_id !== undefined) {
+              direction = tripInfo.direction_id === '0' ? 'outbound' : 'inbound';
             }
             const delay = stu.arrival?.delay || stu.departure?.delay || 0;
             rtArr.push({

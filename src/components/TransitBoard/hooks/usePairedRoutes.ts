@@ -5,7 +5,7 @@ import { useMemo } from 'react';
  */
 export const ROUTE_PAIRS: Record<string, string> = {};
 
-export type Direction = 'northbound' | 'southbound';
+export type Direction = 'northbound' | 'southbound' | 'inbound' | 'outbound';
 
 /**
  * Infer direction for supported routes (e.g., 8A/8B and 400).

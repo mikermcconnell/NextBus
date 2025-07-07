@@ -13,8 +13,8 @@ const DepartureRowComponent: FC<Props> = ({ arrival, format }) => {
 
   return (
     <div
-      className="grid grid-cols-7 gap-2 px-4 py-3 border-b border-gray-200 hover:bg-gray-50"
-      style={{ gridTemplateColumns: '1fr 1fr 2fr 2fr 0.8fr 1fr 1fr' }}
+      className="grid grid-cols-8 gap-2 px-4 py-3 border-b border-gray-200 hover:bg-gray-50"
+      style={{ gridTemplateColumns: '1fr 1fr 1fr 2fr 2fr 0.8fr 1fr 1fr' }}
     >
       {/* Service Logo */}
       <div className="flex items-center justify-center">
@@ -28,6 +28,11 @@ const DepartureRowComponent: FC<Props> = ({ arrival, format }) => {
       {/* Route # */}
       <div className="font-bold text-lg text-barrie-blue flex items-center justify-center transit-route-cell">
         {arrival.routeId}
+      </div>
+
+      {/* Direction */}
+      <div className="text-sm font-medium text-gray-700 flex items-center justify-center">
+        {arrival.direction ? arrival.direction.replace(/^[a-z]/, c => c.toUpperCase()) : '-'}
       </div>
 
       {/* Destination */}

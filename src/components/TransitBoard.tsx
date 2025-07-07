@@ -64,7 +64,7 @@ interface CombinedArrival {
   platform?: string | number;
   isRealtime: boolean;
   gtfsTripId?: string; // GTFS trip ID for matching real-time vs static data
-  direction?: 'northbound' | 'southbound'; // For 8A/8B
+  direction?: 'northbound' | 'southbound' | 'inbound' | 'outbound'; // Direction
   pairedEstimate?: boolean; // True if this is a paired-direction estimate
 }
 
@@ -225,9 +225,11 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
               const minutesUntilArrival = Math.floor((scheduledTime.getTime() - now) / (1000 * 60));
               if (minutesUntilArrival >= -1 && minutesUntilArrival <= APP_CONFIG.MAX_ARRIVALS_WINDOW) {
                 // Infer direction for 8A/8B static arrivals
-                let direction: 'northbound' | 'southbound' | undefined = undefined;
+                let direction: 'northbound' | 'southbound' | 'inbound' | 'outbound' | undefined = undefined;
                 if (readableRouteNumber === '8A' || readableRouteNumber === '8B' || readableRouteNumber === '400') {
                   direction = infer8Direction(readableRouteNumber, headsign);
+                } else if (tripInfo.direction_id !== undefined) {
+                  direction = tripInfo.direction_id === '0' ? 'outbound' : 'inbound';
                 }
                 
                 staticArrivals.push({
@@ -264,9 +266,11 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
                     const tripInfo = staticData.data!.trips.find((trip) => trip.trip_id === gtfsTripId);
                     const headsign = tripInfo?.trip_headsign || 'Unknown Destination';
                     const delay = stopUpdate.arrival?.delay || stopUpdate.departure?.delay || 0;
-                    let direction: 'northbound' | 'southbound' | undefined = undefined;
+                    let direction: 'northbound' | 'southbound' | 'inbound' | 'outbound' | undefined = undefined;
                     if (readableRouteNumber === '8A' || readableRouteNumber === '8B' || readableRouteNumber === '400') {
                       direction = infer8Direction(readableRouteNumber, headsign) as 'northbound' | 'southbound' | undefined;
+                    } else if (tripInfo && tripInfo.direction_id !== undefined) {
+                      direction = tripInfo.direction_id === '0' ? 'outbound' : 'inbound';
                     }
                     if (minutesUntilArrival >= -1 && minutesUntilArrival <= APP_CONFIG.MAX_ARRIVALS_WINDOW) {
                       realtimeArrivals.push({
@@ -620,9 +624,10 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
 
       {/* Table header matching official site */}
       <div className="bg-gray-100 border-b border-gray-300">
-        <div className="grid grid-cols-7 gap-2 px-4 py-3 text-sm font-semibold text-gray-700 text-center items-center" style={{gridTemplateColumns: "1fr 1fr 2fr 2fr 0.8fr 1fr 1fr"}}>
+        <div className="grid grid-cols-8 gap-2 px-4 py-3 text-sm font-semibold text-gray-700 text-center items-center" style={{gridTemplateColumns: "1fr 1fr 1fr 2fr 2fr 0.8fr 1fr 1fr"}}>
           <div className="flex items-center justify-center">Service</div>
           <div className="flex items-center justify-center">Route #</div>
+          <div className="flex items-center justify-center">Direction</div>
           <div className="flex items-center justify-center">Route</div>
           <div className="flex items-center justify-center">Stop</div>
           <div className="flex items-center justify-center">Platform</div>
