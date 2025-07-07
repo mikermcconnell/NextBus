@@ -64,10 +64,14 @@ export function useStopProcessing({ stopCodes, stopNames, staticData, realtimeFe
         if (diffMin < -1 || diffMin > APP_CONFIG.MAX_ARRIVALS_WINDOW) return;
 
         let direction: Direction | undefined;
-        if (routeShort === '8A' || routeShort === '8B' || routeShort === '400') {
+        if (routeShort === '8A' || routeShort === '8B') {
           direction = infer8Direction(routeShort, headsign);
-        } else if (tripInfo.direction_id !== undefined) {
-          direction = tripInfo.direction_id === '0' ? 'outbound' : 'inbound';
+        } else if (routeShort === '400') {
+          direction = infer8Direction(routeShort, headsign); // covers 400
+        } else if (/A/i.test(routeShort)) {
+          direction = 'northbound';
+        } else if (/B/i.test(routeShort)) {
+          direction = 'southbound';
         }
 
         staticArr.push({
@@ -103,10 +107,14 @@ export function useStopProcessing({ stopCodes, stopNames, staticData, realtimeFe
             const tripInfo = staticData.trips.find((t: any) => t.trip_id === gtfsTripId);
             const headsign = tripInfo?.trip_headsign || 'Unknown';
             let direction: Direction | undefined;
-            if (routeShort === '8A' || routeShort === '8B' || routeShort === '400') {
+            if (routeShort === '8A' || routeShort === '8B') {
               direction = infer8Direction(routeShort, headsign);
-            } else if (tripInfo && tripInfo.direction_id !== undefined) {
-              direction = tripInfo.direction_id === '0' ? 'outbound' : 'inbound';
+            } else if (routeShort === '400') {
+              direction = infer8Direction(routeShort, headsign);
+            } else if (/A/i.test(routeShort)) {
+              direction = 'northbound';
+            } else if (/B/i.test(routeShort)) {
+              direction = 'southbound';
             }
             const delay = stu.arrival?.delay || stu.departure?.delay || 0;
             rtArr.push({

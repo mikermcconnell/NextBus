@@ -7,6 +7,9 @@ const inter = Inter({ subsets: ['latin'] });
 export const metadata: Metadata = {
   title: 'Barrie Transit Live Departures',
   description: 'Real-time bus arrival information for Barrie Transit stops',
+  icons: {
+    icon: '/Icon-1.png', // Path inside /public
+  },
 };
 
 export const viewport: Viewport = {

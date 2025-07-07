@@ -226,10 +226,14 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
               if (minutesUntilArrival >= -1 && minutesUntilArrival <= APP_CONFIG.MAX_ARRIVALS_WINDOW) {
                 // Infer direction for 8A/8B static arrivals
                 let direction: 'northbound' | 'southbound' | 'inbound' | 'outbound' | undefined = undefined;
-                if (readableRouteNumber === '8A' || readableRouteNumber === '8B' || readableRouteNumber === '400') {
+                if (readableRouteNumber === '8A' || readableRouteNumber === '8B') {
                   direction = infer8Direction(readableRouteNumber, headsign);
-                } else if (tripInfo.direction_id !== undefined) {
-                  direction = tripInfo.direction_id === '0' ? 'outbound' : 'inbound';
+                } else if (readableRouteNumber === '400') {
+                  direction = infer8Direction(readableRouteNumber, headsign);
+                } else if (/A/i.test(readableRouteNumber)) {
+                  direction = 'northbound';
+                } else if (/B/i.test(readableRouteNumber)) {
+                  direction = 'southbound';
                 }
                 
                 staticArrivals.push({
@@ -267,10 +271,14 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
                     const headsign = tripInfo?.trip_headsign || 'Unknown Destination';
                     const delay = stopUpdate.arrival?.delay || stopUpdate.departure?.delay || 0;
                     let direction: 'northbound' | 'southbound' | 'inbound' | 'outbound' | undefined = undefined;
-                    if (readableRouteNumber === '8A' || readableRouteNumber === '8B' || readableRouteNumber === '400') {
+                    if (readableRouteNumber === '8A' || readableRouteNumber === '8B') {
                       direction = infer8Direction(readableRouteNumber, headsign) as 'northbound' | 'southbound' | undefined;
-                    } else if (tripInfo && tripInfo.direction_id !== undefined) {
-                      direction = tripInfo.direction_id === '0' ? 'outbound' : 'inbound';
+                    } else if (readableRouteNumber === '400') {
+                      direction = infer8Direction(readableRouteNumber, headsign) as 'northbound' | 'southbound' | undefined;
+                    } else if (/A/i.test(readableRouteNumber)) {
+                      direction = 'northbound';
+                    } else if (/B/i.test(readableRouteNumber)) {
+                      direction = 'southbound';
                     }
                     if (minutesUntilArrival >= -1 && minutesUntilArrival <= APP_CONFIG.MAX_ARRIVALS_WINDOW) {
                       realtimeArrivals.push({

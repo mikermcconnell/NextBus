@@ -22,6 +22,10 @@ export function inferDirection(routeId: string, headsign: string): Direction | u
     if (/north|georgian mall/i.test(headsign)) return 'northbound';
     if (/south|park place|downtown barrie terminal/i.test(headsign)) return 'southbound';
   }
+
+  // Generic A/B rule (excluding 8A/8B handled above)
+  if (/A$/i.test(routeId) || routeId.includes('A')) return 'northbound';
+  if (/B$/i.test(routeId) || routeId.includes('B')) return 'southbound';
   return undefined;
 }
 
