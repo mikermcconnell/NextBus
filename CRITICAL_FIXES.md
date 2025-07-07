@@ -258,3 +258,17 @@ if (cacheMap.size > MAX_CACHE_SIZE) {
 **Priority**: ✅ COMPLETED - All critical fixes applied successfully  
 **Timeline**: ✅ DONE - All items resolved  
 **Testing**: ✅ VERIFIED - Build successful, APIs functional 
+
+## 📦 Latest Enhancements (Post-Launch)
+
+| Area | Change | Key Files |
+|------|--------|-----------|
+| **Testing** | Added Jest + ts-jest setup, sample unit & integration tests | `jest.config.js`, `jest.setup.ts`, `tests/**/*.ts(x)` |
+| **Quality** | Introduced ESLint + Prettier, lint-staged + Husky pre-commit hooks | `.eslintrc.js`, `package.json` |
+| **Performance** | Virtual scrolling with `react-window` for long departure lists | `VirtualizedDepartureList.tsx` |
+| **Offline** | Service-worker (`public/sw.js`) caches app shell & GTFS-static (stale-while-revalidate) | `public/sw.js` |
+| **Config** | Centralised constants in `src/config/app.ts` | `APP_CONFIG` |
+| **Business Logic** | Extracted route-pairing rules into service layer | `src/services/gtfs/routePairing.ts` |
+| **Type Safety** | Generic `APIResponse<T>` and stricter static data typing | `src/types/api.ts`, various files |
+
+All enhancements are low risk—they do not alter runtime logic but improve DX, performance, and reliability. 

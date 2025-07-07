@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { fetchStaticGTFS } from '@/lib/gtfs-static';
+import { APP_CONFIG } from '@/config/app';
 
 // Server-side cache
 let cachedStaticData: any = null;
 let cacheExpiry: number = 0;
-const CACHE_DURATION = 60 * 60 * 1000; // 1 hour cache
+const CACHE_DURATION = APP_CONFIG.CACHE_DURATION;
 
 export async function GET(request: NextRequest) {
   try {

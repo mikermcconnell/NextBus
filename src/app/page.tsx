@@ -1,6 +1,8 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { z } from 'zod';
+import { APP_CONFIG } from '@/config/app';
 import TransitBoard from '@/components/TransitBoard';
 import LoadingSpinner from '@/components/LoadingSpinner';
 import ErrorBoundary from '@/components/ErrorBoundary';
@@ -27,6 +29,20 @@ const SUGGESTED_CONFIGS = [
   // Add more suggested configs here if needed
 ];
 
+// ------------------------------
+// Stop code validation
+// ------------------------------
+const StopCodeSchema = z
+  .string()
+  .regex(/^[0-9]{1,6}$/, { message: 'Stop code must be 1-6 digits' })
+  .refine((code: string) => code !== '000000', { message: 'Invalid stop code' });
+
+const validateStopCode = (code: string): string | null => {
+  const trimmed = code.trim();
+  const result = StopCodeSchema.safeParse(trimmed);
+  return result.success ? trimmed : null;
+};
+
 export default function Home() {
   const [stopCodes, setStopCodes] = useState<string[]>([]);
   const [stopNames, setStopNames] = useState<Record<string, string>>({});
@@ -45,10 +61,13 @@ export default function Home() {
   const notificationTimeouts = useRef<Map<string, NodeJS.Timeout>>(new Map());
   
   // Debounce the stop code input for auto-add functionality
-  const debouncedStopCode = useDebounce(newStopCode, 1000);
+  const debouncedStopCode = useDebounce(newStopCode, APP_CONFIG.DEBOUNCE_DELAY);
 
   // Fixed refresh interval at 15 seconds
   const refreshInterval = 15;
+
+  // Highlighted loading overlay condition – only while initial stop data is loading and nothing else is displayed yet
+  const showInitialDataLoading = isLoadingStops && stopCodes.length === 0 && Object.keys(stopNames).length === 0;
 
   // Handle client-side initialization
   useEffect(() => {
@@ -204,16 +223,16 @@ export default function Home() {
       return;
     }
     
-    // Validate stop code format
-    if (!/^[0-9]{1,6}$/.test(newStopCode.trim())) {
+    // Validate stop code format & content
+    if (!validateStopCode(newStopCode)) {
       addNotification({
         type: 'error',
-        message: 'Stop code must be 1-6 digits only'
+        message: 'Stop code must be 1-6 digits and not an invalid placeholder'
       });
       return;
     }
     
-    const trimmedCode = newStopCode.trim();
+    const trimmedCode = validateStopCode(newStopCode)!;
     
     // Check if stop exists in the system
     if (!stopNames[trimmedCode]) {
@@ -224,7 +243,7 @@ export default function Home() {
       return;
     }
     
-    if (trimmedCode && !stopCodes.includes(trimmedCode) && stopCodes.length < 15) {
+    if (trimmedCode && !stopCodes.includes(trimmedCode) && stopCodes.length < APP_CONFIG.MAX_STOPS) {
       setStopCodes([...stopCodes, trimmedCode]);
       setNewStopCode('');
       addNotification({
@@ -236,7 +255,7 @@ export default function Home() {
         type: 'warning',
         message: `Stop code "${trimmedCode}" is already added`
       });
-    } else if (stopCodes.length >= 15) {
+    } else if (stopCodes.length >= APP_CONFIG.MAX_STOPS) {
       addNotification({
         type: 'warning',
         message: 'Maximum of 15 stops allowed'
@@ -312,9 +331,9 @@ export default function Home() {
     
     // Auto-add if conditions are met
     if (trimmedCode &&
-        /^[0-9]{1,6}$/.test(trimmedCode) && 
+        validateStopCode(trimmedCode) && 
         !stopCodes.includes(trimmedCode) && 
-        stopCodes.length < 15 &&
+        stopCodes.length < APP_CONFIG.MAX_STOPS &&
         !isLoadingStops &&
         !stopLoadError &&
         Object.keys(stopNames).length > 0 &&
@@ -377,18 +396,12 @@ export default function Home() {
     setSavedConfigs(savedConfigs.filter(cfg => cfg.name !== name));
   };
 
-  // Don't render until client-side initialization is complete
+  // Early full-screen loading while waiting for hydration
   if (!isClient) {
     return (
-      <main className="min-h-screen p-4 md:p-8 bg-gray-50">
-        <div className="max-w-4xl mx-auto">
-          <h1 className="text-3xl font-bold text-blue-700 mb-8">
-            Barrie Transit Live Departures
-          </h1>
-          <div className="bg-white shadow-lg rounded-lg p-6">
-            <LoadingSpinner message="Initializing..." />
-          </div>
-        </div>
+      <main className="min-h-screen flex items-center justify-center bg-gray-50">
+        {/* Full-screen overlay with extra-large spinner */}
+        <LoadingSpinner size="xl" message="Loading transit data..." />
       </main>
     );
   }
@@ -397,9 +410,16 @@ export default function Home() {
     <ErrorBoundary>
       <main className="min-h-screen p-4 md:p-8 bg-gray-50">
         <div className="max-w-7xl mx-auto">
-          <h1 className="text-3xl font-bold text-blue-700 mb-8">
+          <h1 className="text-3xl font-bold text-blue-700 mb-8 relative">
             Barrie Transit Live Departures
           </h1>
+
+          {/* Overlay during initial load if rendered within main (fallback) */}
+          {showInitialDataLoading && (
+            <div className="fixed inset-0 flex items-center justify-center bg-white/80 z-50">
+              <LoadingSpinner size="xl" message="Loading transit data..." />
+            </div>
+          )}
 
           {/* Notifications */}
           {notifications.length > 0 && (
@@ -517,7 +537,7 @@ export default function Home() {
                         className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-barrie-blue focus:border-barrie-blue disabled:opacity-50"
                         placeholder={isLoadingStops ? "Loading stops..." : "Type stop code or name..."}
                         aria-label="Stop Code or Name"
-                        disabled={stopCodes.length >= 15 || isLoadingStops}
+                        disabled={stopCodes.length >= APP_CONFIG.MAX_STOPS || isLoadingStops}
                         autoComplete="off"
                       />
                       
@@ -559,7 +579,7 @@ export default function Home() {
                     <button
                       type="submit"
                       className="px-4 py-2 text-sm bg-barrie-blue text-white rounded hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-barrie-blue disabled:opacity-50"
-                      disabled={!newStopCode || stopCodes.length >= 15 || isLoadingStops || !!stopLoadError}
+                      disabled={!newStopCode || stopCodes.length >= APP_CONFIG.MAX_STOPS || isLoadingStops || !!stopLoadError}
                     >
                       {isLoadingStops ? 'Loading...' : 'Add'}
                     </button>

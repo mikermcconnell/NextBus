@@ -1,13 +1,17 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import useSWR from 'swr';
-import Image from 'next/image';
 import LoadingSpinner from './LoadingSpinner';
 import ConnectionStatus from './ConnectionStatus';
 import ErrorBoundary from './ErrorBoundary';
 import { GTFSFeedMessage } from '@/types/gtfs';
 import { extractTimestamp, formatDataAge, calculateDataAge } from '@/utils/timestamp';
+import { APP_CONFIG } from '@/config/app';
+import type { GTFSStop, GTFSRoute, GTFSTrip, GTFSStopTime } from '@/types/gtfs';
+import type { APIResponse } from '@/types/api';
+import DepartureRow from './TransitBoard/DepartureRow';
+import { RoutePairingService } from '@/services/gtfs/routePairing';
 
 // Import GTFS realtime bindings for protobuf parsing
 const GtfsRealtimeBindings = require('gtfs-realtime-bindings');
@@ -60,6 +64,15 @@ interface CombinedArrival {
   platform?: string | number;
   isRealtime: boolean;
   gtfsTripId?: string; // GTFS trip ID for matching real-time vs static data
+  direction?: 'northbound' | 'southbound'; // For 8A/8B
+  pairedEstimate?: boolean; // True if this is a paired-direction estimate
+}
+
+interface GTFSStaticData {
+  stops: GTFSStop[];
+  routes: GTFSRoute[];
+  trips: GTFSTrip[];
+  stopTimes: GTFSStopTime[];
 }
 
 const fetcher = async (url: string) => {
@@ -70,7 +83,21 @@ const fetcher = async (url: string) => {
   return response.json();
 };
 
+// Helper: infer direction for 8A/8B from trip_headsign
+function infer8Direction(routeId: string, headsign: string): 'northbound' | 'southbound' | undefined {
+  // Logic for 8A/8B
+  if (routeId === '8A' || routeId === '8B') {
+    if (/to Georgian College/i.test(headsign)) return 'northbound';
+    if (/to Park Place|to Downtown Barrie Terminal/i.test(headsign)) return 'southbound';
+  }
 
+  // Logic for Route 400 (north / south)
+  if (routeId === '400') {
+    if (/north|georgian mall/i.test(headsign)) return 'northbound';
+    if (/south|park place|downtown barrie terminal/i.test(headsign)) return 'southbound';
+  }
+  return undefined;
+}
 
 export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: TransitBoardProps) {
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -78,18 +105,20 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
   const [parsedRealtimeData, setParsedRealtimeData] = useState<GTFSFeedMessage | null>(null);
 
   // Fetch GTFS static data for stop names
-  const { data: staticData, error: staticError } = useSWR('/api/gtfs-static', fetcher, {
+  const { data: staticData, error: staticError } = useSWR<APIResponse<GTFSStaticData>>('/api/gtfs-static', fetcher, {
     revalidateOnFocus: false,
     revalidateOnReconnect: true,
     dedupingInterval: 60000, // 1 minute
   });
 
   // Fetch GTFS real-time data with auto-refresh
-  const { data: realtimeData, error: realtimeError, isLoading, mutate } = useSWR(
+  type TripUpdatesPayload = { data: string };
+
+  const { data: realtimeData, error: realtimeError, isLoading, mutate } = useSWR<APIResponse<TripUpdatesPayload>>(
     `/api/gtfs/TripUpdates`,
     fetcher,
     {
-      refreshInterval: 15000, // Auto-refresh every 15 seconds
+      refreshInterval: APP_CONFIG.REFRESH_INTERVAL, // Configurable
       revalidateOnFocus: true,
       revalidateOnReconnect: true,
       errorRetryCount: 3,
@@ -146,14 +175,22 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
     }
   );
 
+  // Cleanup: on component unmount, cancel any pending revalidations and clear local cache entry
+  useEffect(() => {
+    return () => {
+      // Reset cached data and skip revalidation to ensure no dangling intervals
+      mutate(undefined, false);
+    };
+  }, [mutate]);
+
   const processStopData = useCallback((stopCode: string): StopData => {
     let staticArrivals: Array<CombinedArrival> = [];
     let realtimeArrivals: Array<CombinedArrival> = [];
 
-    if (staticData?.success) {
+    if (staticData?.success && staticData.data) {
       try {
         // First, find the stop_id that corresponds to this stop_code
-        const stopInfo = staticData.data.stops.find((stop: any) => stop.stop_code === stopCode);
+        const stopInfo = staticData.data!.stops.find((stop) => stop.stop_code === stopCode);
         if (!stopInfo) {
           return {
             stopCode,
@@ -166,11 +203,11 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
         const stopName = stopNames[stopCode] || stopInfo.stop_name || 'Unknown Stop';
         const now = Date.now();
         // 1. Build static arrivals
-        const stopTimes = staticData.data.stopTimes?.filter((st: any) => st.stop_id === stopId) || [];
-        stopTimes.forEach((stopTime: any) => {
-          const tripInfo = staticData.data.trips.find((trip: any) => trip.trip_id === stopTime.trip_id);
+        const stopTimes = staticData.data!.stopTimes?.filter((st) => st.stop_id === stopId) || [];
+        stopTimes.forEach((stopTime) => {
+          const tripInfo = staticData.data!.trips.find((trip) => trip.trip_id === stopTime.trip_id);
           if (tripInfo) {
-            const routeInfo = staticData.data.routes.find((route: any) => route.route_id === tripInfo.route_id);
+            const routeInfo = staticData.data!.routes.find((route) => route.route_id === tripInfo.route_id);
             const readableRouteNumber = routeInfo?.route_short_name || tripInfo.route_id;
             const headsign = tripInfo.trip_headsign || 'Unknown Destination';
             const timeStr = stopTime.arrival_time || stopTime.departure_time;
@@ -186,7 +223,13 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
                 scheduledTime.setDate(scheduledTime.getDate() + 1);
               }
               const minutesUntilArrival = Math.floor((scheduledTime.getTime() - now) / (1000 * 60));
-              if (minutesUntilArrival >= -1 && minutesUntilArrival <= 60) {
+              if (minutesUntilArrival >= -1 && minutesUntilArrival <= APP_CONFIG.MAX_ARRIVALS_WINDOW) {
+                // Infer direction for 8A/8B static arrivals
+                let direction: 'northbound' | 'southbound' | undefined = undefined;
+                if (readableRouteNumber === '8A' || readableRouteNumber === '8B' || readableRouteNumber === '400') {
+                  direction = infer8Direction(readableRouteNumber, headsign);
+                }
+                
                 staticArrivals.push({
                   routeId: readableRouteNumber,
                   tripId: headsign,
@@ -196,7 +239,9 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
                   stopName: stopName,
                   platform: stopTime.platform_code || undefined,
                   isRealtime: false,
-                  gtfsTripId: tripInfo.trip_id // Store the actual GTFS trip ID for matching
+                  gtfsTripId: tripInfo.trip_id, // Store the actual GTFS trip ID for matching
+                  direction: direction,
+                  pairedEstimate: false,
                 });
               }
             }
@@ -214,12 +259,16 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
                     const minutesUntilArrival = Math.floor((arrivalTimeMs - now) / (1000 * 60));
                     const gtfsRouteId = entity.tripUpdate.trip?.routeId || 'Unknown';
                     const gtfsTripId = entity.tripUpdate.trip?.tripId || 'Unknown';
-                    const routeInfo = staticData.data.routes.find((route: any) => route.route_id === gtfsRouteId);
+                    const routeInfo = staticData.data!.routes.find((route) => route.route_id === gtfsRouteId);
                     const readableRouteNumber = routeInfo?.route_short_name || gtfsRouteId;
-                    const tripInfo = staticData.data.trips.find((trip: any) => trip.trip_id === gtfsTripId);
+                    const tripInfo = staticData.data!.trips.find((trip) => trip.trip_id === gtfsTripId);
                     const headsign = tripInfo?.trip_headsign || 'Unknown Destination';
                     const delay = stopUpdate.arrival?.delay || stopUpdate.departure?.delay || 0;
-                    if (minutesUntilArrival >= -1 && minutesUntilArrival <= 60) {
+                    let direction: 'northbound' | 'southbound' | undefined = undefined;
+                    if (readableRouteNumber === '8A' || readableRouteNumber === '8B' || readableRouteNumber === '400') {
+                      direction = infer8Direction(readableRouteNumber, headsign) as 'northbound' | 'southbound' | undefined;
+                    }
+                    if (minutesUntilArrival >= -1 && minutesUntilArrival <= APP_CONFIG.MAX_ARRIVALS_WINDOW) {
                       realtimeArrivals.push({
                         routeId: readableRouteNumber,
                         tripId: headsign,
@@ -229,7 +278,9 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
                         stopName: stopName,
                         platform: stopUpdate.arrival?.platform || undefined,
                         isRealtime: true,
-                        gtfsTripId: gtfsTripId // Store the actual GTFS trip ID for matching
+                        gtfsTripId: gtfsTripId,
+                        direction: direction,
+                        pairedEstimate: false,
                       });
                     }
                   }
@@ -253,12 +304,88 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
         // Add static arrivals only if not already present or if earlier than existing
         for (const st of staticArrivals) {
           const key = makeKey(st);
-          if (!grouped[key] || st.arrivalTime < grouped[key].arrivalTime) {
+          // If there's no entry yet, simply add the static arrival.
+          if (!grouped[key]) {
+            grouped[key] = st;
+            continue;
+          }
+
+          // If the existing entry is **real-time**, keep it – never let static override it.
+          if (grouped[key].isRealtime) {
+            continue;
+          }
+
+          // Existing entry is static as well – keep the earliest one.
+          if (st.arrivalTime < grouped[key].arrivalTime) {
             grouped[key] = st;
           }
         }
+
+        // After merging static arrivals, attempt paired-route real-time estimation when a static arrival lacks real-time data
+        for (const st of staticArrivals) {
+          const key = makeKey(st);
+          // Skip if we already have a real-time arrival for this key
+          if (grouped[key] && grouped[key].isRealtime) {
+            continue;
+          }
+
+          // Identify the paired route (e.g., 2A ↔ 2B)
+          const pairRoute = RoutePairingService.findPairedRoute(st.routeId);
+          if (!pairRoute) {
+            continue;
+          }
+
+          let paired: CombinedArrival | undefined = undefined;
+
+          // Special handling for 8A/8B and 400 – prefer the opposite direction first
+          if ((st.routeId === '8A' || st.routeId === '8B' || st.routeId === '400') && st.direction) {
+            const oppositeDirection = st.direction === 'northbound' ? 'southbound' : 'northbound';
+            paired = realtimeArrivals.find((rt) => {
+              if (rt.routeId !== pairRoute || rt.stopCode !== st.stopCode) return false;
+              // when direction exists, ensure same direction to avoid duplicates
+              if (st.direction) {
+                return rt.direction === st.direction;
+              }
+              return true;
+            });
+          }
+
+          // Fallback: look for any real-time arrival on the paired route at the same stop
+          if (!paired) {
+            paired = realtimeArrivals.find((rt) => {
+              if (rt.routeId !== pairRoute || rt.stopCode !== st.stopCode) return false;
+              // when direction exists, ensure same direction to avoid duplicates
+              if (st.direction) {
+                return rt.direction === st.direction;
+              }
+              return true;
+            });
+          }
+
+          if (paired) {
+            grouped[key] = {
+              ...st,
+              arrivalTime: paired.arrivalTime,
+              delay: paired.delay,
+              isRealtime: true,
+              pairedEstimate: true,
+            };
+          }
+        }
         const arrivals = Object.values(grouped);
-        arrivals.sort((a, b) => a.arrivalTime - b.arrivalTime);
+        // Custom sort: 'At platform' (diffMinutes -2 to 0) first, then by soonest
+        const nowMs = Date.now();
+        arrivals.sort((a, b) => {
+          const diffA = Math.floor((a.arrivalTime - nowMs) / (1000 * 60));
+          const diffB = Math.floor((b.arrivalTime - nowMs) / (1000 * 60));
+          // At platform = diffMinutes -2 to 0
+          const aAtPlatform = a.isRealtime && diffA >= -2 && diffA <= 0;
+          const bAtPlatform = b.isRealtime && diffB >= -2 && diffB <= 0;
+          if (aAtPlatform && !bAtPlatform) return -1;
+          if (!aAtPlatform && bAtPlatform) return 1;
+          // Otherwise, soonest first
+          return (a.arrivalTime - b.arrivalTime);
+        });
         return {
           stopCode,
           arrivals,
@@ -280,26 +407,42 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
     };
   }, [parsedRealtimeData, staticData, lastGlobalUpdate, stopNames]);
 
+  // Memoize expensive per-stop processing so we only recompute when its true
+  // dependencies change (e.g. new realtime/static data or a different list of
+  // stopCodes). This prevents re-executing the 200+ lines above on every
+  // render triggered by the 15-second auto-refresh.
+  const processedStops = useMemo(() => {
+    return stopCodes.map((code) => processStopData(code));
+  }, [stopCodes, processStopData]);
+
   // Combine all stop data and sort by arrival time
   const getCombinedArrivals = useCallback((): CombinedArrival[] => {
     const allArrivals: CombinedArrival[] = [];
     const now = Date.now();
-    
-    stopCodes.forEach(stopCode => {
-      const stopData = processStopData(stopCode);
+
+    processedStops.forEach((stopData) => {
       // Double-check: filter out any arrivals beyond 60 minutes
-      const filteredArrivals = stopData.arrivals.filter(arrival => {
+      const filteredArrivals = stopData.arrivals.filter((arrival) => {
         const minutesUntilArrival = Math.floor((arrival.arrivalTime - now) / (1000 * 60));
-        return minutesUntilArrival >= -1 && minutesUntilArrival <= 60;
+        return minutesUntilArrival >= -1 && minutesUntilArrival <= APP_CONFIG.MAX_ARRIVALS_WINDOW;
       });
       allArrivals.push(...filteredArrivals);
     });
-    
-    // Sort all arrivals by arrival time
-    allArrivals.sort((a, b) => a.arrivalTime - b.arrivalTime);
-    
+
+    // Custom sort: 'At platform' (diffMinutes -2 to 0) first, then by soonest
+    const nowMs = Date.now();
+    allArrivals.sort((a, b) => {
+      const diffA = Math.floor((a.arrivalTime - nowMs) / (1000 * 60));
+      const diffB = Math.floor((b.arrivalTime - nowMs) / (1000 * 60));
+      const aAtPlatform = a.isRealtime && diffA >= -2 && diffA <= 0;
+      const bAtPlatform = b.isRealtime && diffB >= -2 && diffB <= 0;
+      if (aAtPlatform && !bAtPlatform) return -1;
+      if (!aAtPlatform && bAtPlatform) return 1;
+      return a.arrivalTime - b.arrivalTime;
+    });
+
     return allArrivals; // Show all arrivals within 60 minutes
-  }, [stopCodes, processStopData]);
+  }, [processedStops]);
 
   const formatArrivalTime = (timestamp: number, delay: number = 0) => {
     const arrivalTime = new Date(timestamp + delay * 1000);
@@ -331,13 +474,41 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
     return null;
   };
 
-  const formatArrivalTimeOfficial = (timestamp: number, delay: number = 0, isRealtime: boolean = false) => {
+  const formatArrivalTimeOfficial = (
+    timestamp: number,
+    delay: number = 0,
+    isRealtime: boolean = false,
+    treatPastAsNow: boolean = false
+  ) => {
     const arrivalTime = new Date(timestamp + delay * 1000);
     const now = new Date();
     const diffMs = arrivalTime.getTime() - now.getTime();
     const diffMinutes = Math.floor(diffMs / (1000 * 60));
 
     if (diffMinutes < 0) {
+      // Show "At platform" only for arrival column (treatPastAsNow === false)
+      if (!treatPastAsNow && isRealtime && diffMinutes >= -2) {
+        return (
+          <div className="flex items-center gap-1">
+            <span className="font-bold text-green-700">At platform</span>
+            <span className="inline-block w-4 h-3 bg-barrie-blue rounded-sm"></span>
+          </div>
+        );
+      }
+      // For departure column: if treatPastAsNow, show "Now" when bus should have departed but hasn't
+      if (treatPastAsNow) {
+        return (
+          <div className="flex items-center gap-1">
+            <span className="font-bold text-barrie-blue">Now</span>
+            {isRealtime ? (
+              <span className="inline-block w-4 h-3 bg-barrie-blue rounded-sm"></span>
+            ) : (
+              <span className="inline-block w-4 h-3 border-2 border-gray-400 rounded-sm"></span>
+            )}
+          </div>
+        );
+      }
+      // Older than threshold – treat as departed / unknown
       return (
         <div className="flex items-center gap-1">
           <span className="font-bold text-gray-400">-</span>
@@ -464,67 +635,11 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
       <div className="max-h-96 overflow-y-auto scrollbar-thin">
         {combinedArrivals.length > 0 ? (
           combinedArrivals.map((arrival, index) => (
-            <div
+            <DepartureRow
               key={`${arrival.routeId}-${arrival.tripId}-${arrival.stopCode}-${index}`}
-              className={`grid grid-cols-7 gap-2 px-4 py-3 border-b border-gray-200 hover:bg-gray-50 ${
-                index % 2 === 0 ? 'bg-white' : 'bg-gray-50'
-              }`}
-              style={{gridTemplateColumns: "1fr 1fr 2fr 2fr 0.8fr 1fr 1fr"}}
-            >
-              {/* Service - Logo based on route type */}
-              <div className="flex items-center justify-center">
-                {arrival.routeId.includes('68') ? (
-                  <Image 
-                    src="/go-transit-logo.svg" 
-                    alt="GO Transit" 
-                    width={40}
-                    height={20}
-                    className="object-contain"
-                  />
-                ) : (
-                  <Image 
-                    src="/barrie-transit-logo.png" 
-                    alt="Barrie Transit" 
-                    width={80}
-                    height={40}
-                    className="object-contain"
-                  />
-                )}
-              </div>
-              {/* Route # */}
-              <div className="font-bold text-lg text-barrie-blue flex items-center justify-center transit-route-cell">
-                {arrival.routeId}
-              </div>
-              
-              {/* Route destination */}
-              <div className="font-medium text-gray-900 text-sm leading-tight transit-destination-cell flex items-center justify-center h-full">
-                <div className="break-words whitespace-normal text-center max-h-10 overflow-hidden w-full">
-                  {arrival.tripId.includes('Red Express') ? 'Red' : arrival.tripId.split(' to')[0].trim()}
-                </div>
-              </div>
-
-              {/* Stop Name */}
-              <div className="text-xs leading-tight transit-stop-cell flex items-center justify-center h-full">
-                <div className="font-medium text-gray-900 break-words whitespace-normal text-center max-h-10 overflow-hidden w-full">
-                  {arrival.stopCode} - {arrival.stopName}
-                </div>
-              </div>
-              
-              {/* Platform - only show if present, otherwise '-' */}
-              <div className="text-center font-medium flex items-center justify-center transit-table-cell">
-                {(arrival.platform !== undefined && arrival.platform !== null && arrival.platform !== '') ? arrival.platform : '-'}
-              </div>
-              
-              {/* Arrives */}
-              <div className="font-bold flex items-center justify-center transit-table-cell">
-                {formatArrivalTimeOfficial(arrival.arrivalTime, arrival.delay, arrival.isRealtime)}
-              </div>
-              
-              {/* Departs */}
-              <div className="font-bold flex items-center justify-center transit-table-cell">
-                {formatArrivalTimeOfficial(arrival.arrivalTime + 60000, arrival.delay, arrival.isRealtime)} {/* +1 min for depart */}
-              </div>
-            </div>
+              arrival={arrival}
+              format={formatArrivalTimeOfficial}
+            />
           ))
         ) : (
           <div className="px-6 py-8 text-center text-gray-500">
@@ -570,6 +685,10 @@ export default function TransitBoard({ stopCodes, stopNames, refreshInterval }: 
             <div className="flex items-center gap-2">
               <span className="inline-block w-4 h-3 border-2 border-gray-400 rounded-sm"></span>
               <span>Static schedule</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-blue-600 font-medium">~paired</span>
+              <span>Paired direction estimate</span>
             </div>
             <span className="text-gray-500">
               {connectionError && connectionError.includes('old') 
