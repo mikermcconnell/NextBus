@@ -13,8 +13,8 @@ export class RoutePairingService {
    * estimate from a paired direction/route.
    */
   static generatePairedEstimate(
-    staticArrival: CombinedArrival,
-    realtimeArrivals: CombinedArrival[],
+    _staticArrival: CombinedArrival,
+    _realtimeArrivals: CombinedArrival[],
   ): CombinedArrival | undefined {
     // Pairing disabled – always return undefined
     return undefined;

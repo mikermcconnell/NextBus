@@ -1,5 +1,4 @@
 import * as GtfsRealtimeBindings from 'gtfs-realtime-bindings';
-import Long from 'long';
 import { getRouteInfo, getTripInfo } from './gtfs-static';
 
 export interface ArrivalTime {
